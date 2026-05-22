@@ -265,8 +265,6 @@ export default function Marketplace() {
                         isLiked
                           ? "text-[#e879f9] border-[rgba(232,121,249,0.3)] bg-[rgba(232,121,249,0.08)]"
                           : "text-[#3d6655] border-[rgba(255,255,255,0.06)] hover:border-[rgba(232,121,249,0.2)]"
-                          ? "text-[#1aad89] border-[rgba(21,133,105,0.3)] bg-[rgba(21,133,105,0.08)]"
-                          : "text-[#3d6655] border-[rgba(255,255,255,0.06)] hover:border-[rgba(21,133,105,0.2)]"
                       }`}
                     >
                       <Heart size={12} fill={isLiked ? "currentColor" : "none"} />

@@ -9,15 +9,30 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@1shotapi/client-sdk": "^1.1.9",
+    "@1shotapi/x402-facilitator": "^2.0.0",
+    "@ai-sdk/openai": "^3.0.65",
+    "@fal-ai/client": "^1.10.1",
+    "@metamask/smart-accounts-kit": "^1.5.0",
     "@react-three/fiber": "^9.6.1",
     "@react-three/postprocessing": "^3.0.4",
+    "@tavily/core": "^0.7.3",
+    "@x402/core": "^2.12.0",
+    "@x402/evm": "^2.12.0",
+    "@xyflow/react": "^12.10.2",
+    "ai": "^6.0.190",
+    "exa-js": "^2.13.0",
     "framer-motion": "^12.39.0",
     "lucide-react": "^1.16.0",
+    "mongodb": "^7.2.0",
     "next": "16.2.6",
+    "openai": "^6.38.0",
     "postprocessing": "^6.39.1",
     "react": "19.2.4",
     "react-dom": "19.2.4",
-    "three": "^0.184.0"
+    "three": "^0.184.0",
+    "viem": "^2.50.4",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",

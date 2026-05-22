@@ -1,330 +1,231 @@
 "use client";
 
-import React, { useState, useRef, useEffect } from "react";
-import { Play, Pause, Plus, Trash2, Settings, Zap } from "lucide-react";
-import { BlueprintNode, BlueprintEdge } from "@/lib/aiCompiler";
+import React, { useCallback, useMemo } from "react";
+import {
+  ReactFlow,
+  Background,
+  Controls,
+  MiniMap,
+  addEdge,
+  useNodesState,
+  useEdgesState,
+  type Node,
+  type Edge,
+  type NodeTypes,
+  type Connection,
+  BackgroundVariant,
+  Handle,
+  Position,
+} from "@xyflow/react";
+import "@xyflow/react/dist/style.css";
+import { Zap, Brain, DollarSign, Bell, GitBranch, TrendingUp, Globe, Search, Image, AlertTriangle, BarChart2, Activity } from "lucide-react";
+import type { BlueprintNode, BlueprintEdge } from "@/lib/aiCompiler";
+import { PROTOCOL_METADATA } from "@/lib/protocols/actions";
+import { PROTOCOL_LOGOS } from "@/lib/protocols/logos";
+
+// ── Node colour + icon mapping ────────────────────────────────────────────────
+
+const NODE_STYLES: Record<string, { border: string; glow: string; bg: string; icon: React.ReactNode }> = {
+  trigger:              { border: "#10B981", glow: "rgba(16,185,129,0.35)",  bg: "#0a1a12", icon: <Zap       size={12} className="text-emerald-400" /> },
+  budget:               { border: "#F59E0B", glow: "rgba(245,158,11,0.35)",  bg: "#1a1200", icon: <DollarSign size={12} className="text-amber-400"   /> },
+  intelligence:         { border: "#8B5CF6", glow: "rgba(139,92,246,0.35)",  bg: "#100a1a", icon: <Brain      size={12} className="text-violet-400"  /> },
+  "intelligence-tavily":{ border: "#06B6D4", glow: "rgba(6,182,212,0.35)",   bg: "#00101a", icon: <Globe      size={12} className="text-cyan-400"    /> },
+  "intelligence-exa":   { border: "#A78BFA", glow: "rgba(167,139,250,0.35)", bg: "#0d0a1a", icon: <Search     size={12} className="text-purple-300"  /> },
+  "intelligence-fal":   { border: "#F472B6", glow: "rgba(244,114,182,0.35)", bg: "#1a0010", icon: <Image         size={12} className="text-pink-300"    /> },
+  "risk-check":         { border: "#EF4444", glow: "rgba(239,68,68,0.35)",   bg: "#1a0000", icon: <AlertTriangle  size={12} className="text-red-400"     /> },
+  "compare-apy":        { border: "#34D399", glow: "rgba(52,211,153,0.35)",  bg: "#001a0f", icon: <BarChart2      size={12} className="text-emerald-300" /> },
+  "sentiment-check":    { border: "#FBBF24", glow: "rgba(251,191,36,0.35)",  bg: "#1a1000", icon: <Activity       size={12} className="text-yellow-400"  /> },
+  "defi-swap": { border: "#FF007A", glow: "rgba(255,0,122,0.35)",   bg: "#1a000a", icon: <TrendingUp size={12} className="text-pink-400"    /> },
+  "defi-lend": { border: "#2470ff", glow: "rgba(36,112,255,0.35)",  bg: "#000a1a", icon: <TrendingUp size={12} className="text-blue-400"    /> },
+  "defi-stake":{ border: "#00a3ff", glow: "rgba(0,163,255,0.35)",   bg: "#00080f", icon: <TrendingUp size={12} className="text-sky-400"     /> },
+  "defi-save": { border: "#f4b731", glow: "rgba(244,183,49,0.35)",  bg: "#100800", icon: <TrendingUp size={12} className="text-yellow-400"  /> },
+  "defi-lp":   { border: "#ff6b00", glow: "rgba(255,107,0,0.35)",   bg: "#100400", icon: <TrendingUp size={12} className="text-orange-400"  /> },
+  defi:        { border: "#10B981", glow: "rgba(16,185,129,0.35)",  bg: "#0a1a12", icon: <TrendingUp size={12} className="text-emerald-400" /> },
+  condition:   { border: "#EC4899", glow: "rgba(236,72,153,0.35)",  bg: "#1a0010", icon: <GitBranch  size={12} className="text-pink-400"    /> },
+  notify:      { border: "#60A5FA", glow: "rgba(96,165,250,0.35)",  bg: "#000a1a", icon: <Bell       size={12} className="text-blue-300"    /> },
+};
+const DEFAULT_STYLE = NODE_STYLES.defi;
+
+// ── Custom node component ─────────────────────────────────────────────────────
+
+function WorkflowNode({ data, selected }: { data: BlueprintNode & { isActive: boolean }; selected?: boolean }) {
+  const style = NODE_STYLES[data.type] ?? DEFAULT_STYLE;
+  const isActive = data.isActive;
+  const protocolMeta = data.protocol ? PROTOCOL_METADATA[data.protocol] : null;
+
+  return (
+    <div
+      className="relative rounded-xl overflow-visible cursor-default"
+      style={{
+        minWidth: 170,
+        maxWidth: 200,
+        background: style.bg,
+        border: `1.5px solid ${isActive || selected ? style.border : `${style.border}55`}`,
+        boxShadow: isActive
+          ? `0 0 22px ${style.glow}, 0 0 6px ${style.glow}`
+          : selected ? `0 0 12px ${style.glow}` : "none",
+        transition: "all 0.2s ease",
+      }}
+    >
+      {isActive && (
+        <div
+          className="absolute inset-0 rounded-xl animate-ping pointer-events-none"
+          style={{ border: `1px solid ${style.border}`, opacity: 0.35 }}
+        />
+      )}
+
+      <Handle
+        type="target"
+        position={Position.Left}
+        style={{ background: style.border, width: 8, height: 8, border: "2px solid #0a0f0c" }}
+      />
+
+      <div
+        className="flex items-center gap-2 px-3 py-2 border-b"
+        style={{ borderColor: `${style.border}33`, background: `${style.border}10` }}
+      >
+        <span className="flex-shrink-0">{style.icon}</span>
+        <span className="text-[11px] font-bold leading-tight text-white/85 truncate">{data.label}</span>
+      </div>
+
+      <div className="px-3 py-2">
+        <p className="text-[9px] leading-relaxed text-white/40 line-clamp-2">{data.description}</p>
+        {protocolMeta && (
+          <div
+            className="mt-1.5 inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[8px] font-mono font-bold uppercase tracking-wider"
+            style={{
+              color: protocolMeta.color,
+              background: `${protocolMeta.color}15`,
+              border: `1px solid ${protocolMeta.color}30`,
+            }}
+          >
+            {data.protocol && PROTOCOL_LOGOS[data.protocol] && (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={PROTOCOL_LOGOS[data.protocol]}
+                alt={data.protocol}
+                width={10}
+                height={10}
+                className="rounded-sm"
+                onError={(e) => { e.currentTarget.style.display = "none"; }}
+              />
+            )}
+            {protocolMeta.name}
+          </div>
+        )}
+      </div>
+
+      <Handle
+        type="source"
+        position={Position.Right}
+        style={{ background: style.border, width: 8, height: 8, border: "2px solid #0a0f0c" }}
+      />
+    </div>
+  );
+}
+
+const NODE_TYPES: NodeTypes = { workflow: WorkflowNode };
+
+// ── Conversion helpers ────────────────────────────────────────────────────────
+
+function toRfNode(n: BlueprintNode, activeId: string | null): Node {
+  return {
+    id: n.id,
+    type: "workflow",
+    position: { x: n.x, y: n.y },
+    data: { ...n, isActive: n.id === activeId },
+  };
+}
+
+function toRfEdge(e: BlueprintEdge, animated: boolean): Edge {
+  return {
+    id: e.id,
+    source: e.source,
+    target: e.target,
+    animated,
+    style: { stroke: "#1aad8966", strokeWidth: 1.5 },
+    type: "smoothstep",
+  };
+}
+
+// ── Component ─────────────────────────────────────────────────────────────────
 
 interface BlueprintCanvasProps {
   nodes: BlueprintNode[];
   edges: BlueprintEdge[];
-  onNodesChange: (nodes: BlueprintNode[]) => void;
-  onEdgesChange: (edges: BlueprintEdge[]) => void;
+  onNodesChange?: (nodes: BlueprintNode[]) => void;
+  onEdgesChange?: (edges: BlueprintEdge[]) => void;
   isExecuting: boolean;
   activeNodeId: string | null;
+  onNodeClick?: (node: BlueprintNode) => void;
 }
 
 export default function BlueprintCanvas({
-  nodes,
-  edges,
-  onNodesChange,
-  onEdgesChange,
+  nodes: cloveNodes,
+  edges: cloveEdges,
   isExecuting,
-  activeNodeId
+  activeNodeId,
+  onNodeClick,
 }: BlueprintCanvasProps) {
-  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
-  const [draggingNodeId, setDraggingNodeId] = useState<string | null>(null);
-  const dragStartOffset = useRef({ x: 0, y: 0 });
-  const containerRef = useRef<HTMLDivElement>(null);
-  
-  // Animation state for the pulse along the lines
-  const [pulseProgress, setPulseProgress] = useState(0);
+  const [rfNodes, setRfNodes, onRfNodesChange] = useNodesState(
+    useMemo(() => cloveNodes.map((n) => toRfNode(n, activeNodeId)), [])  // eslint-disable-line react-hooks/exhaustive-deps
+  );
+  const [rfEdges, setRfEdges, onRfEdgesChange] = useEdgesState(
+    useMemo(() => cloveEdges.map((e) => toRfEdge(e, isExecuting)), [])  // eslint-disable-line react-hooks/exhaustive-deps
+  );
 
-  useEffect(() => {
-    if (!isExecuting) {
-      setPulseProgress(0);
-      return;
-    }
-    const interval = setInterval(() => {
-      setPulseProgress((prev) => (prev >= 1 ? 0 : prev + 0.015));
-    }, 30);
-    return () => clearInterval(interval);
-  }, [isExecuting]);
+  // Sync from external prop changes (new workflow compiled)
+  React.useEffect(() => {
+    setRfNodes(cloveNodes.map((n) => toRfNode(n, activeNodeId)));
+  }, [cloveNodes, activeNodeId, setRfNodes]);
 
-  // Handle dragging
-  const handleNodeMouseDown = (e: React.MouseEvent, node: BlueprintNode) => {
-    if (draggingNodeId) return;
-    e.stopPropagation();
-    setSelectedNodeId(node.id);
-    setDraggingNodeId(node.id);
-    
-    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    dragStartOffset.current = {
-      x: e.clientX - rect.left,
-      y: e.clientY - rect.top
-    };
-  };
+  React.useEffect(() => {
+    setRfEdges(cloveEdges.map((e) => toRfEdge(e, isExecuting)));
+  }, [cloveEdges, isExecuting, setRfEdges]);
 
-  const handleMouseMove = (e: React.MouseEvent) => {
-    if (!draggingNodeId || !containerRef.current) return;
-    
-    const containerRect = containerRef.current.getBoundingClientRect();
-    const x = e.clientX - containerRect.left - dragStartOffset.current.x;
-    const y = e.clientY - containerRect.top - dragStartOffset.current.y;
-    
-    // Grid snapping (12px grid)
-    const snapGrid = (val: number) => Math.round(val / 12) * 12;
+  const handleNodesChange = useCallback(
+    (changes: Parameters<typeof onRfNodesChange>[0]) => {
+      onRfNodesChange(changes);
+    },
+    [onRfNodesChange]
+  );
 
-    onNodesChange(
-      nodes.map((node) => {
-        if (node.id === draggingNodeId) {
-          return {
-            ...node,
-            x: Math.max(20, Math.min(containerRect.width - 240, snapGrid(x))),
-            y: Math.max(20, Math.min(containerRect.height - 140, snapGrid(y)))
-          };
-        }
-        return node;
-      })
-    );
-  };
-
-  const handleMouseUp = () => {
-    setDraggingNodeId(null);
-  };
-
-  // Node coloring details based on type
-  const getNodeStyles = (type: BlueprintNode["type"]) => {
-    switch (type) {
-      case "trigger":
-        return {
-          border: "border-[#edff70]/30 hover:border-[#edff70]/80",
-          glow: "shadow-[0_0_15px_rgba(237,255,112,0.1)]",
-          tagBg: "bg-[#edff70]/10 text-[#edff70]"
-        };
-      case "budget":
-        return {
-          border: "border-cyan-400/30 hover:border-cyan-400/80",
-          glow: "shadow-[0_0_15px_rgba(34,211,238,0.1)]",
-          tagBg: "bg-cyan-500/10 text-cyan-400"
-        };
-      case "intelligence":
-        return {
-          border: "border-[#f8286d]/30 hover:border-[#f8286d]/80",
-          glow: "shadow-[0_0_15px_rgba(248,40,109,0.15)]",
-          tagBg: "bg-[#f8286d]/10 text-[#f8286d]"
-        };
-      case "defi":
-        return {
-          border: "border-[#ff3ec5]/30 hover:border-[#ff3ec5]/80",
-          glow: "shadow-[0_0_15px_rgba(255,62,197,0.15)]",
-          tagBg: "bg-[#ff3ec5]/10 text-[#ff3ec5]"
-        };
-      case "notify":
-        return {
-          border: "border-amber-400/30 hover:border-amber-400/80",
-          glow: "shadow-[0_0_15px_rgba(251,191,36,0.1)]",
-          tagBg: "bg-amber-500/10 text-amber-400"
-        };
-    }
-  };
-
-  // Bezier curve calculations for SVG paths
-  const getBezierPath = (x1: number, y1: number, x2: number, y2: number) => {
-    const controlOffset = Math.max(60, Math.abs(x2 - x1) * 0.4);
-    return `M ${x1} ${y1} C ${x1 + controlOffset} ${y1}, ${x2 - controlOffset} ${y2}, ${x2} ${y2}`;
-  };
+  const onConnect = useCallback(
+    (connection: Connection) =>
+      setRfEdges((eds) =>
+        addEdge({ ...connection, animated: isExecuting, style: { stroke: "#1aad8966", strokeWidth: 1.5 }, type: "smoothstep" }, eds)
+      ),
+    [isExecuting, setRfEdges]
+  );
 
   return (
-    <div className="relative flex flex-col flex-1 min-h-[460px] select-none rounded-xl border border-glass-border bg-[#050505] overflow-hidden">
-      
-      {/* Handdrawn line warp SVG filter */}
-      <svg style={{ position: "absolute", width: 0, height: 0 }} width="0" height="0">
-        <defs>
-          <filter id="blueprint-sketch" x="-10%" y="-10%" width="120%" height="120%">
-            <feTurbulence type="fractalNoise" baseFrequency="0.04" numOctaves="3" result="noise" />
-            <feDisplacementMap in="SourceGraphic" in2="noise" scale="2" xChannelSelector="R" yChannelSelector="G" />
-          </filter>
-        </defs>
-      </svg>
-
-      {/* Grid drafting board */}
-      <div 
-        ref={containerRef}
-        className="absolute inset-0 blueprint-radial-grid opacity-75"
-        onMouseMove={handleMouseMove}
-        onMouseUp={handleMouseUp}
-        onMouseLeave={handleMouseUp}
+    <div className="w-full h-full" style={{ background: "#060a08" }}>
+      <ReactFlow
+        nodes={rfNodes}
+        edges={rfEdges}
+        onNodesChange={handleNodesChange}
+        onEdgesChange={onRfEdgesChange}
+        onConnect={onConnect}
+        onNodeClick={(_, node) => onNodeClick?.(node.data as unknown as BlueprintNode)}
+        nodeTypes={NODE_TYPES}
+        fitView
+        fitViewOptions={{ padding: 0.35 }}
+        minZoom={0.1}
+        maxZoom={3}
+        proOptions={{ hideAttribution: true }}
+        style={{ background: "transparent" }}
       >
-        {/* SVG connection pathways */}
-        <svg className="absolute inset-0 pointer-events-none w-full h-full">
-          {edges.map((edge) => {
-            const sourceNode = nodes.find((n) => n.id === edge.source);
-            const targetNode = nodes.find((n) => n.id === edge.target);
-            if (!sourceNode || !targetNode) return null;
-
-            // Compute connection terminals
-            const startX = sourceNode.x + 220; // right middle port
-            const startY = sourceNode.y + 40;
-            const endX = targetNode.x; // left middle port
-            const endY = targetNode.y + 40;
-
-            const path = getBezierPath(startX, startY, endX, endY);
-            const isActive = isExecuting && 
-              (activeNodeId === sourceNode.id || activeNodeId === targetNode.id);
-
-            // Compute flow particle location
-            let dotX = 0;
-            let dotY = 0;
-            if (isExecuting) {
-              const t = pulseProgress;
-              const ctrlX1 = startX + Math.max(60, Math.abs(endX - startX) * 0.4);
-              const ctrlY1 = startY;
-              const ctrlX2 = endX - Math.max(60, Math.abs(endX - startX) * 0.4);
-              const ctrlY2 = endY;
-
-              // Cubic Bezier curve formula
-              dotX = (1 - t) ** 3 * startX + 3 * (1 - t) ** 2 * t * ctrlX1 + 3 * (1 - t) * t ** 2 * ctrlX2 + t ** 3 * endX;
-              dotY = (1 - t) ** 3 * startY + 3 * (1 - t) ** 2 * t * ctrlY1 + 3 * (1 - t) * t ** 2 * ctrlY2 + t ** 3 * endY;
-            }
-
-            return (
-              <g key={edge.id} filter="url(#blueprint-sketch)">
-                {/* Background glow path */}
-                <path
-                  d={path}
-                  fill="none"
-                  stroke={isActive ? "#edff70" : "#ffffff"}
-                  strokeWidth={isActive ? 3 : 1.5}
-                  className={`transition-all duration-300 ${
-                    isActive ? "stroke-opacity-80" : "stroke-opacity-10"
-                  }`}
-                />
-                
-                {/* Active flow signal dashes */}
-                {isActive && (
-                  <path
-                    d={path}
-                    fill="none"
-                    stroke="#f8286d"
-                    strokeWidth={3}
-                    strokeDasharray="5, 10"
-                    className="animate-flow-dash stroke-opacity-90"
-                  />
-                )}
-
-                {/* Simulated travelling particle */}
-                {isExecuting && (
-                  <circle
-                    cx={dotX}
-                    cy={dotY}
-                    r={5}
-                    fill="#edff70"
-                    className="shadow-lg filter drop-shadow-[0_0_6px_#edff70]"
-                  />
-                )}
-              </g>
-            );
-          })}
-        </svg>
-
-        {/* Workflow Node Blocks */}
-        {nodes.map((node) => {
-          const styles = getNodeStyles(node.type);
-          const isSelected = selectedNodeId === node.id;
-          const isActive = activeNodeId === node.id;
-          
-          return (
-            <div
-              key={node.id}
-              style={{
-                left: `${node.x}px`,
-                top: `${node.y}px`,
-                position: "absolute"
-              }}
-              onMouseDown={(e) => handleNodeMouseDown(e, node)}
-              className={`w-[220px] rounded-lg border bg-[#090909]/95 p-3.5 backdrop-blur-md cursor-grab active:cursor-grabbing transition-shadow duration-200 ${
-                styles.border
-              } ${styles.glow} ${
-                isSelected ? "ring-1 ring-[#f8286d]" : ""
-              } ${
-                isActive ? "border-[#edff70] ring-1 ring-[#edff70]" : ""
-              }`}
-            >
-              {/* Displacement filter on node borders */}
-              <div 
-                className="absolute inset-0 pointer-events-none rounded-lg border border-transparent"
-                style={{ filter: "url(#blueprint-sketch)" }}
-              />
-
-              <div className="flex items-center justify-between mb-2">
-                <span className={`text-[10px] uppercase tracking-widest font-mono font-bold px-1.5 py-0.5 rounded ${styles.tagBg}`}>
-                  {node.type}
-                </span>
-                
-                {isActive && (
-                  <span className="flex h-2 w-2 relative">
-                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#edff70] opacity-75"></span>
-                    <span className="relative inline-flex rounded-full h-2 w-2 bg-[#edff70]"></span>
-                  </span>
-                )}
-              </div>
-
-              <h3 className="text-sm font-semibold tracking-tight text-white mb-0.5 font-sans select-none">
-                {node.label}
-              </h3>
-              <p className="text-[11px] leading-4 text-zinc-400 select-none">
-                {node.description}
-              </p>
-
-              {/* Staggered connection terminal ports */}
-              <div className="absolute top-1/2 -left-1.5 -translate-y-1/2 w-3 h-3 rounded-full border border-zinc-700 bg-black flex items-center justify-center">
-                <div className="w-1.5 h-1.5 rounded-full bg-zinc-600" />
-              </div>
-              <div className="absolute top-1/2 -right-1.5 -translate-y-1/2 w-3 h-3 rounded-full border border-zinc-700 bg-black flex items-center justify-center">
-                <div className={`w-1.5 h-1.5 rounded-full ${isActive ? "bg-[#edff70]" : "bg-zinc-600"}`} />
-              </div>
-            </div>
-          );
-        })}
-      </div>
-
-      {/* Grid instructions overlay overlay */}
-      <div className="absolute bottom-3 left-4 flex gap-4 text-[10px] font-mono text-zinc-500 pointer-events-none select-none z-10">
-        <span>GRID: Snapped (12px)</span>
-        <span>FILTER: Sketch active</span>
-        <span>NODES: {nodes.length}</span>
-      </div>
-
-      {/* Node controller bar */}
-      <div className="absolute top-3 right-4 flex gap-1.5 z-10">
-        <button
-          onClick={() => {
-            const id = `custom-node-${nodes.length}`;
-            const newNode: BlueprintNode = {
-              id,
-              type: "notify",
-              label: "New Notification",
-              description: "Custom trigger notification logs.",
-              x: 100 + Math.random() * 80,
-              y: 220 + Math.random() * 40,
-              config: { channel: "Custom" }
-            };
-            onNodesChange([...nodes, newNode]);
-            if (nodes.length > 0) {
-              const lastNode = nodes[nodes.length - 1];
-              onEdgesChange([...edges, { id: `e-custom-${edges.length}`, source: lastNode.id, target: id }]);
-            }
-          }}
-          className="p-1.5 rounded-md border border-glass-border bg-glass-bg text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors"
-          title="Add Node"
-        >
-          <Plus size={14} />
-        </button>
-        <button
-          onClick={() => {
-            if (selectedNodeId) {
-              onNodesChange(nodes.filter(n => n.id !== selectedNodeId));
-              onEdgesChange(edges.filter(e => e.source !== selectedNodeId && e.target !== selectedNodeId));
-              setSelectedNodeId(null);
-            }
-          }}
-          disabled={!selectedNodeId}
-          className="p-1.5 rounded-md border border-glass-border bg-glass-bg text-zinc-400 hover:text-red-400 hover:bg-red-500/10 disabled:opacity-40 disabled:hover:text-zinc-400 disabled:hover:bg-transparent transition-colors"
-          title="Delete Selected Node"
-        >
-          <Trash2 size={14} />
-        </button>
-      </div>
+        <Background variant={BackgroundVariant.Dots} gap={24} size={1} color="#1a2e22" />
+        <Controls
+          showInteractive={false}
+          style={{ background: "#0a0f0c", border: "1px solid rgba(21,133,105,0.2)", borderRadius: 8 }}
+        />
+        <MiniMap
+          nodeColor={(n) => (NODE_STYLES[(n.data as unknown as BlueprintNode)?.type ?? "defi"] ?? DEFAULT_STYLE).border}
+          maskColor="rgba(6,10,8,0.85)"
+          style={{ background: "#0a0f0c", border: "1px solid rgba(21,133,105,0.15)", borderRadius: 8 }}
+        />
+      </ReactFlow>
     </div>
   );
 }
