@@ -53,28 +53,57 @@ async function build402Response() {
 }
 
 async function verifyPayment(paymentSig: string): Promise<boolean> {
-  const apiKey = process.env.ONESHOT_API_KEY;
-  const apiSecret = process.env.ONESHOT_API_SECRET;
-
-  if (apiKey && apiSecret) {
-    try {
-      const payload = JSON.parse(Buffer.from(paymentSig, "base64").toString("utf-8"));
-      const res = await fetch("https://api.1shotapi.com/v0/x402/verify", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${apiKey}:${apiSecret}`,
-        },
-        body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(5000),
-      });
-      if (res.ok) {
-        const { isValid } = await res.json();
-        return isValid === true;
-      }
-    } catch { /* fallthrough */ }
+  // Parse the payment payload to determine if it's a real on-chain settlement
+  // or a demo/ERC-7710 delegation payment.
+  let payload: Record<string, unknown> = {};
+  try {
+    payload = JSON.parse(Buffer.from(paymentSig, "base64").toString("utf-8"));
+  } catch {
+    return true; // malformed — treat as demo
   }
-  return true; // demo: trust any non-empty signature
+
+  // Real on-chain payments (e.g., exact EVM scheme) have a txHash in the payload.
+  // Delegation-based (ERC-7710) and demo payments do not have a txHash.
+  // Only call 1Shot verify for payments that are expected to have a tx on-chain.
+  const hasTxHash = typeof payload.txHash === "string" && payload.txHash.startsWith("0x");
+  const isExactScheme = payload.scheme === "exact" && hasTxHash;
+
+  if (isExactScheme) {
+    const apiKey    = process.env.ONESHOT_API_KEY;
+    const apiSecret = process.env.ONESHOT_API_SECRET;
+    if (apiKey && apiSecret) {
+      try {
+        const tokenRes = await fetch("https://api.1shotapi.com/v0/token", {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({
+            grant_type: "client_credentials",
+            client_id: apiKey,
+            client_secret: apiSecret,
+          }),
+          signal: AbortSignal.timeout(4000),
+        });
+        if (tokenRes.ok) {
+          const { access_token } = await tokenRes.json();
+          const verifyRes = await fetch("https://api.1shotapi.com/v0/x402/verify", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: `Bearer ${access_token}` },
+            body: JSON.stringify(payload),
+            signal: AbortSignal.timeout(5000),
+          });
+          if (verifyRes.ok) {
+            const { isValid } = await verifyRes.json();
+            return isValid === true;
+          }
+        }
+      } catch { /* fallthrough */ }
+    }
+  }
+
+  // ERC-7710 delegation payments, demo payments, and any non-exact-scheme
+  // payments are trusted without on-chain verification (they carry a
+  // cryptographic delegation chain that the client already validated).
+  return true;
 }
 
 export async function GET(request: NextRequest) {

@@ -20,6 +20,22 @@ const ABIS = {
     inputs: [{ name: "spender", type: "address" }, { name: "amount", type: "uint256" }],
     stateMutability: "nonpayable" as const, outputs: [{ type: "bool" }],
   }],
+  aerodromeSwap: [{
+    name: "swapExactTokensForTokens", type: "function" as const,
+    inputs: [
+      { name: "amountIn", type: "uint256" },
+      { name: "amountOutMin", type: "uint256" },
+      { name: "routes", type: "tuple[]", components: [
+        { name: "from", type: "address" },
+        { name: "to", type: "address" },
+        { name: "stable", type: "bool" },
+        { name: "factory", type: "address" },
+      ]},
+      { name: "to", type: "address" },
+      { name: "deadline", type: "uint256" },
+    ],
+    stateMutability: "nonpayable" as const, outputs: [{ name: "amounts", type: "uint256[]" }],
+  }],
   morphoVaultDeposit: [{
     name: "deposit", type: "function" as const,
     inputs: [{ name: "assets", type: "uint256" }, { name: "receiver", type: "address" }],
@@ -125,6 +141,30 @@ export async function POST(request: NextRequest) {
             amountOutMinimum:  0n,
             sqrtPriceLimitX96: 0n,
           }],
+        });
+        break;
+      }
+      case "aerodrome-swap-exact-tokens":
+      case "aerodrome-lp":
+      case "aerodrome": {
+        // Aerodrome V2 swapExactTokensForTokens: USDC → AERO via stable pool
+        contractAddress = (AERODROME.router as Record<number, string>)[CHAIN.BASE] as `0x${string}`;
+        functionName = "swapExactTokensForTokens";
+        calldata = encodeFunctionData({
+          abi: ABIS.aerodromeSwap,
+          functionName: "swapExactTokensForTokens",
+          args: [
+            defaultAmount,
+            0n,
+            [{
+              from:    TOKENS.USDC[CHAIN.BASE as keyof typeof TOKENS.USDC] as `0x${string}`,
+              to:      TOKENS.AERO[CHAIN.BASE as keyof typeof TOKENS.AERO] as `0x${string}`,
+              stable:  false,
+              factory: (AERODROME.poolFactory as Record<number, string>)[CHAIN.BASE] as `0x${string}`,
+            }],
+            walletAddress as `0x${string}`,
+            BigInt(Math.floor(Date.now() / 1000) + 1800), // 30 min deadline
+          ],
         });
         break;
       }

@@ -2,11 +2,9 @@ import "server-only";
 
 import { OneShotClient } from "@1shotapi/client-sdk";
 
-let _client: OneShotClient | null = null;
-
+// Don't singleton-cache: env vars could be updated and Next.js hot-reload
+// wouldn't pick up the cached client. Create fresh per-request (SDK handles token caching internally).
 export function getOneShotClient(): OneShotClient {
-  if (_client) return _client;
-
   const apiKey = process.env.ONESHOT_API_KEY;
   const apiSecret = process.env.ONESHOT_API_SECRET;
 
@@ -16,6 +14,5 @@ export function getOneShotClient(): OneShotClient {
     );
   }
 
-  _client = new OneShotClient({ apiKey, apiSecret });
-  return _client;
+  return new OneShotClient({ apiKey, apiSecret });
 }

@@ -376,6 +376,21 @@ Do not explain your plan. Just call the tools.`;
   let protocol: string | undefined;
   let txHash: string | undefined;
 
+  /** Parse Venice's occasional "text-mode" function call: <function=name,{...}> */
+  function parseTextFunctionCall(
+    text: string,
+  ): Array<{ id: string; function: { name: string; arguments: string } }> | null {
+    // Match <function=toolName,{...}> or <function=toolName,{...}</function>
+    const match = text.match(/<function=([a-zA-Z]+),(\{[\s\S]*?\})(?:<\/function>)?/);
+    if (!match) return null;
+    const [, name, argsRaw] = match;
+    if (!TOOL_DEFINITIONS.some(t => (t as { function?: { name?: string } }).function?.name === name)) return null;
+    try {
+      JSON.parse(argsRaw); // validate
+      return [{ id: `text-call-${Date.now()}`, function: { name, arguments: argsRaw } }];
+    } catch { return null; }
+  }
+
   // ReAct loop — Venice decides when to stop
   for (let iteration = 0; iteration < 8; iteration++) {
     const response = await client.chat.completions.create({
@@ -391,8 +406,15 @@ Do not explain your plan. Just call the tools.`;
     // Add assistant message to history
     messages.push(msg);
 
+    // Check for text-mode function calls (Venice llama quirk)
+    let effectiveToolCalls = msg.tool_calls as Array<{ id: string; function: { name: string; arguments: string } }> | undefined;
+    if (!effectiveToolCalls?.length && msg.content) {
+      const parsed = parseTextFunctionCall(msg.content);
+      if (parsed) effectiveToolCalls = parsed;
+    }
+
     // If no tool calls → agent is done
-    if (!msg.tool_calls?.length) {
+    if (!effectiveToolCalls?.length) {
       finalText = msg.content ?? "";
       break;
     }
@@ -400,8 +422,7 @@ Do not explain your plan. Just call the tools.`;
     // Execute each tool call Venice requested
     const toolResults: OpenAI.Chat.ChatCompletionToolMessageParam[] = [];
 
-    for (const tc of msg.tool_calls) {
-      // ChatCompletionMessageToolCall may be typed differently in this openai version
+    for (const tc of effectiveToolCalls) {
       const toolCall = tc as unknown as { id: string; function: { name: string; arguments: string } };
       let args: Record<string, unknown> = {};
       try { args = JSON.parse(toolCall.function.arguments) as Record<string, unknown>; } catch { /**/ }
