@@ -67,7 +67,7 @@ const STRATEGIES: Strategy[] = [
     name: "Morpho Liquidation Opportunity Scanner",
     creator: "QuantLabs",
     badge: "Free tier",
-    badgeColor: "#1aad89",
+    badgeColor: "#C8FF3D",
     description: "Scans Morpho markets for liquidatable positions. Calculates profitability after gas, triggers flash-loan liquidation.",
     tags: ["Liquidation", "Morpho", "Flash Loans"],
     nodesCount: 5,
@@ -103,21 +103,21 @@ export default function Marketplace() {
   });
 
   return (
-    <div className="min-h-screen bg-[#060a08] text-[#edfaf5] font-sans">
+    <div className="min-h-screen bg-[#060a08] text-[#E8E5DA] font-sans">
 
       {/* Navbar */}
-      <header className="sticky top-0 z-50 border-b border-[rgba(21,133,105,0.15)] bg-[rgba(6,10,8,0.9)] backdrop-blur-md">
+      <header className="sticky top-0 z-50 border-b border-[rgba(200,255,61,0.15)] bg-[rgba(6,10,8,0.9)] backdrop-blur-md">
         <nav className="max-w-7xl mx-auto px-6 h-14 flex items-center justify-between">
           <div className="flex items-center gap-2.5">
-            <div className="w-7 h-7 rounded-lg bg-[#158569] flex items-center justify-center">
+            <div className="w-7 h-7 rounded-lg bg-[#C8FF3D] flex items-center justify-center">
               <Zap size={14} className="text-white" />
             </div>
-            <span className="font-bold text-sm text-[#edfaf5]">CLOVE</span>
+            <span className="font-bold text-sm text-[#E8E5DA]">CLOVE</span>
           </div>
-          <div className="hidden md:flex items-center gap-8 text-[0.78rem] font-medium text-[#7aad97]">
-            <a href="/" className="hover:text-[#edfaf5] transition-colors">Product</a>
-            <a href="/marketplace" className="text-[#1aad89] border-b border-[#158569] pb-0.5">Marketplace</a>
-            <a href="#" className="hover:text-[#edfaf5] transition-colors">Docs</a>
+          <div className="hidden md:flex items-center gap-8 text-[0.78rem] font-medium text-[#B5B2A5]">
+            <a href="/" className="hover:text-[#E8E5DA] transition-colors">Product</a>
+            <a href="/marketplace" className="text-[#C8FF3D] border-b border-[#C8FF3D] pb-0.5">Marketplace</a>
+            <a href="#" className="hover:text-[#E8E5DA] transition-colors">Docs</a>
           </div>
           <a
             href="/dashboard"
@@ -133,16 +133,16 @@ export default function Marketplace() {
         {/* Hero */}
         <div className="space-y-3 max-w-2xl">
           <p className="section-label">WEB3 WORKFLOW TEMPLATES</p>
-          <h1 className="text-4xl font-extrabold tracking-tight text-[#edfaf5]">
+          <h1 className="text-4xl font-extrabold tracking-tight text-[#E8E5DA]">
             DeFi Agent{" "}
             <span
               className="bg-clip-text text-transparent"
-              style={{ backgroundImage: "linear-gradient(90deg, #1aad89, #22d3ee)" }}
+              style={{ backgroundImage: "linear-gradient(90deg, #C8FF3D, #22d3ee)" }}
             >
               Marketplace
             </span>
           </h1>
-          <p className="text-sm leading-6 text-[#7aad97]">
+          <p className="text-sm leading-6 text-[#B5B2A5]">
             Browse community-scouted autonomous strategies. All blueprints are non-custodial and deploy in one click via ERC-7715 and x402.
           </p>
         </div>
@@ -150,15 +150,15 @@ export default function Marketplace() {
         {/* Search + Filters */}
         <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
           <div className="flex items-center gap-2 flex-wrap">
-            <Filter size={13} className="text-[#1aad89]" />
+            <Filter size={13} className="text-[#C8FF3D]" />
             {FILTERS.map((f) => (
               <button
                 key={f}
                 onClick={() => setFilter(f)}
                 className={`text-[11px] font-mono px-3 py-1.5 rounded-lg border transition-all ${
                   filter === f
-                    ? "bg-[rgba(21,133,105,0.2)] border-[rgba(21,133,105,0.5)] text-[#1aad89]"
-                    : "border-[rgba(255,255,255,0.07)] text-[#3d6655] hover:text-[#7aad97] hover:border-[rgba(255,255,255,0.12)]"
+                    ? "bg-[rgba(200,255,61,0.2)] border-[rgba(200,255,61,0.5)] text-[#C8FF3D]"
+                    : "border-[rgba(255,255,255,0.07)] text-[#6B6A60] hover:text-[#B5B2A5] hover:border-[rgba(255,255,255,0.12)]"
                 }`}
               >
                 {f}
@@ -167,26 +167,26 @@ export default function Marketplace() {
           </div>
 
           <div className="relative">
-            <Search size={12} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#3d6655]" />
+            <Search size={12} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#6B6A60]" />
             <input
               type="text"
               value={search}
               onChange={e => setSearch(e.target.value)}
               placeholder="Search templates..."
-              className="bg-[rgba(14,14,28,0.8)] border border-[rgba(21,133,105,0.2)] rounded-lg pl-8 pr-4 py-1.5 text-[11px] font-mono text-[#7aad97] placeholder-[#3d6655] focus:outline-none focus:border-[rgba(21,133,105,0.5)] w-52 transition-colors"
+              className="bg-[rgba(14,14,28,0.8)] border border-[rgba(200,255,61,0.2)] rounded-lg pl-8 pr-4 py-1.5 text-[11px] font-mono text-[#B5B2A5] placeholder-[#6B6A60] focus:outline-none focus:border-[rgba(200,255,61,0.5)] w-52 transition-colors"
             />
           </div>
         </div>
 
-        <div className="flex items-center justify-between border-b border-[rgba(21,133,105,0.1)] pb-4">
-          <span className="text-[10px] font-mono text-[#3d6655]">
+        <div className="flex items-center justify-between border-b border-[rgba(200,255,61,0.1)] pb-4">
+          <span className="text-[10px] font-mono text-[#6B6A60]">
             Showing {filtered.length} verified strategy templates
           </span>
           <div className="flex items-center gap-2">
-            <button className="text-[10px] font-mono px-3 py-1 rounded-lg bg-[rgba(21,133,105,0.15)] border border-[rgba(21,133,105,0.3)] text-[#1aad89]">
+            <button className="text-[10px] font-mono px-3 py-1 rounded-lg bg-[rgba(200,255,61,0.15)] border border-[rgba(200,255,61,0.3)] text-[#C8FF3D]">
               Newest
             </button>
-            <button className="text-[10px] font-mono px-3 py-1 rounded-lg border border-[rgba(255,255,255,0.07)] text-[#3d6655] hover:text-[#7aad97] transition-colors">
+            <button className="text-[10px] font-mono px-3 py-1 rounded-lg border border-[rgba(255,255,255,0.07)] text-[#6B6A60] hover:text-[#B5B2A5] transition-colors">
               Top used
             </button>
           </div>
@@ -200,21 +200,21 @@ export default function Marketplace() {
               <div
                 key={strategy.id}
                 onClick={() => handleDeploy(strategy.prompt)}
-                className="group relative flex flex-col justify-between border border-[rgba(21,133,105,0.18)] bg-[#0a0f0c] hover:border-[rgba(21,133,105,0.45)] rounded-xl p-6 cursor-pointer transition-all hover:shadow-[0_0_30px_rgba(21,133,105,0.1)] overflow-hidden"
+                className="group relative flex flex-col justify-between border border-[rgba(200,255,61,0.18)] bg-[#0a0f0c] hover:border-[rgba(200,255,61,0.45)] rounded-xl p-6 cursor-pointer transition-all hover:shadow-[0_0_30px_rgba(200,255,61,0.1)] overflow-hidden"
               >
                 {/* Top glow line on hover */}
-                <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-[rgba(21,133,105,0.5)] to-transparent scale-x-0 group-hover:scale-x-100 transition-transform duration-500" />
+                <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-[rgba(200,255,61,0.5)] to-transparent scale-x-0 group-hover:scale-x-100 transition-transform duration-500" />
 
                 <div className="space-y-4">
                   <div className="flex items-start justify-between gap-3">
                     <div className="space-y-1">
                       <div className="flex items-center gap-2">
-                        <h3 className="text-[14px] font-bold text-[#edfaf5] group-hover:text-[#1aad89] transition-colors leading-snug">
+                        <h3 className="text-[14px] font-bold text-[#E8E5DA] group-hover:text-[#C8FF3D] transition-colors leading-snug">
                           {strategy.name}
                         </h3>
                       </div>
-                      <p className="text-[10px] font-mono text-[#3d6655]">
-                        by <span className="text-[#7aad97]">{strategy.creator}</span>
+                      <p className="text-[10px] font-mono text-[#6B6A60]">
+                        by <span className="text-[#B5B2A5]">{strategy.creator}</span>
                       </p>
                     </div>
                     <span
@@ -229,13 +229,13 @@ export default function Marketplace() {
                     </span>
                   </div>
 
-                  <p className="text-[12px] leading-5 text-[#7aad97]">{strategy.description}</p>
+                  <p className="text-[12px] leading-5 text-[#B5B2A5]">{strategy.description}</p>
 
                   <div className="flex flex-wrap gap-1.5">
                     {strategy.tags.map((tag) => (
                       <span
                         key={tag}
-                        className="text-[9px] font-mono text-[#3d6655] border border-[rgba(255,255,255,0.06)] bg-[rgba(255,255,255,0.02)] px-2 py-0.5 rounded"
+                        className="text-[9px] font-mono text-[#6B6A60] border border-[rgba(255,255,255,0.06)] bg-[rgba(255,255,255,0.02)] px-2 py-0.5 rounded"
                       >
                         {tag}
                       </span>
@@ -243,8 +243,8 @@ export default function Marketplace() {
                   </div>
                 </div>
 
-                <div className="flex items-center justify-between border-t border-[rgba(21,133,105,0.1)] mt-5 pt-4">
-                  <div className="flex items-center gap-3 text-[10px] font-mono text-[#3d6655]">
+                <div className="flex items-center justify-between border-t border-[rgba(200,255,61,0.1)] mt-5 pt-4">
+                  <div className="flex items-center gap-3 text-[10px] font-mono text-[#6B6A60]">
                     <span className="flex items-center gap-1">
                       <ShieldCheck size={11} className="text-[#22d3ee]" />
                       Audited
@@ -264,13 +264,13 @@ export default function Marketplace() {
                       className={`p-1.5 rounded-lg border transition-colors ${
                         isLiked
                           ? "text-[#e879f9] border-[rgba(232,121,249,0.3)] bg-[rgba(232,121,249,0.08)]"
-                          : "text-[#3d6655] border-[rgba(255,255,255,0.06)] hover:border-[rgba(232,121,249,0.2)]"
+                          : "text-[#6B6A60] border-[rgba(255,255,255,0.06)] hover:border-[rgba(232,121,249,0.2)]"
                       }`}
                     >
                       <Heart size={12} fill={isLiked ? "currentColor" : "none"} />
                     </button>
                     <button
-                      className="text-[10px] font-bold font-mono px-3 py-1.5 rounded-lg bg-[rgba(21,133,105,0.15)] border border-[rgba(21,133,105,0.3)] text-[#1aad89] hover:bg-[rgba(21,133,105,0.04)] flex items-center gap-1 transition-all group-hover:bg-[#158569] group-hover:text-white"
+                      className="text-[10px] font-bold font-mono px-3 py-1.5 rounded-lg bg-[rgba(200,255,61,0.15)] border border-[rgba(200,255,61,0.3)] text-[#C8FF3D] hover:bg-[rgba(200,255,61,0.04)] flex items-center gap-1 transition-all group-hover:bg-[#C8FF3D] group-hover:text-white"
                     >
                       Deploy <ArrowRight size={10} />
                     </button>

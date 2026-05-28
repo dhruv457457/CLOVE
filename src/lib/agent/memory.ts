@@ -1,11 +1,16 @@
 import "server-only";
 import { getDb } from "@/lib/db/mongodb";
-import type { CompiledWorkflow } from "@/lib/aiCompiler";
+
+// Lightweight stand-in for the deleted aiCompiler type — workflows are stored
+// as opaque JSON in MongoDB for legacy compat; no schema validation needed.
+type CompiledWorkflow = { nodes: unknown[]; edges: unknown[]; [k: string]: unknown };
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
 export interface RunMemory {
   walletAddress: string;
+  // MEM-1 fix: add agentId so multi-agent teams don't share each other's run history
+  agentId?:      string;
   runId:         string;
   timestamp:     Date;
   success:       boolean;
@@ -51,21 +56,34 @@ export async function saveRun(run: Omit<RunMemory, "timestamp">): Promise<void> 
   });
 }
 
-export async function getLastRuns(walletAddress: string, n = 5): Promise<RunMemory[]> {
+// MEM-1 fix: filter by agentId when provided so each agent sees only its own history
+export async function getLastRuns(walletAddress: string, n = 5, agentId?: string): Promise<RunMemory[]> {
   const db = await getDb();
   if (!db) return [];
+  const filter: Record<string, unknown> = { walletAddress };
+  if (agentId) filter.agentId = agentId;
   return db
     .collection<RunMemory>("agent_runs")
-    .find({ walletAddress })
+    .find(filter)
     .sort({ timestamp: -1 })
     .limit(n)
     .toArray();
 }
 
-export async function getPosition(walletAddress: string): Promise<AgentPosition | null> {
+// PROTO-3 fix: return ALL positions for a wallet (keyed by protocol)
+export async function getPositions(walletAddress: string): Promise<AgentPosition[]> {
+  const db = await getDb();
+  if (!db) return [];
+  return db.collection<AgentPosition>("agent_positions").find({ walletAddress }).toArray();
+}
+
+// Keep single-protocol getter for backward compat
+export async function getPosition(walletAddress: string, protocol?: string): Promise<AgentPosition | null> {
   const db = await getDb();
   if (!db) return null;
-  return db.collection<AgentPosition>("agent_positions").findOne({ walletAddress });
+  const filter: Record<string, unknown> = { walletAddress };
+  if (protocol) filter.protocol = protocol;
+  return db.collection<AgentPosition>("agent_positions").findOne(filter);
 }
 
 export async function updatePosition(
@@ -76,8 +94,9 @@ export async function updatePosition(
 ): Promise<void> {
   const db = await getDb();
   if (!db) return;
+  // PROTO-3 fix: key by { walletAddress, protocol } so Morpho + Lido don't overwrite each other
   await db.collection<AgentPosition>("agent_positions").updateOne(
-    { walletAddress },
+    { walletAddress, protocol },
     {
       $set: {
         walletAddress,
@@ -166,6 +185,94 @@ export async function getEnabledSchedules(): Promise<SavedSchedule[]> {
   return db.collection<SavedSchedule>("schedules").find({ enabled: true }).toArray();
 }
 
+// ── Agent insights (reflection memory) ─────────────────────────────────────────
+
+/** Insight visibility scope.
+ *   "agent"  — only this agent's planner sees it (default)
+ *   "team"   — shared across all agents under the same root delegator (Scout writes, Executor reads)
+ *   "wallet" — shared across all agents owned by the same wallet
+ */
+export type InsightScope = "agent" | "team" | "wallet";
+
+export interface AgentInsight {
+  agentId:       string;
+  walletAddress?: string;       // for "wallet" scope queries
+  rootAgentId?:  string;        // for "team" scope queries (root of delegation chain)
+  runId:         string;
+  text:          string;        // e.g. "Sky APY has fallen 4 days straight — deprioritize"
+  tags:          string[];      // legacy cheap-retrieval signal — kept for back-compat
+  scope:         InsightScope;
+  /** 1536-dim Venice embedding for semantic retrieval. */
+  embedding?:    number[];
+  createdAt:     Date;
+}
+
+export async function saveInsight(insight: Omit<AgentInsight, "createdAt" | "scope"> & { scope?: InsightScope }): Promise<void> {
+  const db = await getDb();
+  if (!db) return;
+  await db.collection<AgentInsight>("agent_insights").insertOne({
+    ...insight,
+    scope:     insight.scope ?? "agent",
+    createdAt: new Date(),
+  });
+}
+
+/** Most recent N insights for an agent — injected into the next plan prompt. */
+export async function getRecentInsights(agentId: string, n = 6): Promise<AgentInsight[]> {
+  const db = await getDb();
+  if (!db) return [];
+  return db
+    .collection<AgentInsight>("agent_insights")
+    .find({ agentId })
+    .sort({ createdAt: -1 })
+    .limit(n)
+    .toArray();
+}
+
+/** Retrieve insights by tag overlap — cheap relevance check before LLM injection. */
+export async function getInsightsByTags(agentId: string, tags: string[], n = 6): Promise<AgentInsight[]> {
+  const db = await getDb();
+  if (!db) return [];
+  return db
+    .collection<AgentInsight>("agent_insights")
+    .find({ agentId, tags: { $in: tags } })
+    .sort({ createdAt: -1 })
+    .limit(n)
+    .toArray();
+}
+
+// ── Semantic + cross-agent retrieval ──────────────────────────────────────────
+
+/**
+ * Get the candidate pool for cross-agent retrieval.
+ * Includes:
+ *   1. All "agent"-scoped insights from this agent
+ *   2. All "team"-scoped insights from agents sharing the same rootAgentId
+ *   3. All "wallet"-scoped insights from agents owned by walletAddress
+ */
+export async function getInsightCandidates(
+  agentId: string,
+  walletAddress: string,
+  rootAgentId: string | undefined,
+  limit = 100,
+): Promise<AgentInsight[]> {
+  const db = await getDb();
+  if (!db) return [];
+
+  const orClauses: Record<string, unknown>[] = [
+    { agentId, scope: "agent" },
+    { walletAddress, scope: "wallet" },
+  ];
+  if (rootAgentId) orClauses.push({ rootAgentId, scope: "team" });
+
+  return db
+    .collection<AgentInsight>("agent_insights")
+    .find({ $or: orClauses })
+    .sort({ createdAt: -1 })
+    .limit(limit)
+    .toArray();
+}
+
 // ── Memory prompt for Venice ──────────────────────────────────────────────────
 
 function relativeTime(date: Date): string {
@@ -190,23 +297,27 @@ function apyTrend(snapshots: ApySnapshot[], protocol: keyof ApySnapshot["yields"
   return `${points} ${arrow}`;
 }
 
-export async function buildMemoryPrompt(walletAddress: string): Promise<string> {
-  const [lastRuns, position, apyHistory] = await Promise.all([
-    getLastRuns(walletAddress, 5),
-    getPosition(walletAddress),
+// MEM-1 fix: accept agentId so each agent in a multi-agent team gets its own history
+export async function buildMemoryPrompt(walletAddress: string, agentId?: string): Promise<string> {
+  const [lastRuns, positions, apyHistory] = await Promise.all([
+    getLastRuns(walletAddress, 5, agentId),  // MEM-1: agent-scoped runs
+    getPositions(walletAddress),             // PROTO-3: all protocol positions
     getApyHistory(7),
   ]);
 
-  if (!lastRuns.length && !position) {
-    return "AGENT MEMORY: No previous runs for this wallet. This is the first execution.";
+  if (!lastRuns.length && !positions.length) {
+    return "AGENT MEMORY: No previous runs. This is the first execution.";
   }
 
   const lines: string[] = ["AGENT MEMORY:"];
 
-  // Current position
-  if (position) {
-    const when = relativeTime(position.entryTimestamp ?? position.updatedAt);
-    lines.push(`Current position: $${position.amount} in ${position.protocol} @ ${position.entryApy}% APY (${when})`);
+  // PROTO-3 fix: show ALL active positions, not just the last one
+  if (positions.length > 0) {
+    lines.push("Active positions:");
+    for (const p of positions) {
+      const when = relativeTime(p.entryTimestamp ?? p.updatedAt);
+      lines.push(`  $${p.amount} in ${p.protocol} @ ${p.entryApy}% APY (entered ${when})`);
+    }
   } else {
     lines.push("Current position: None (no active deposit)");
   }

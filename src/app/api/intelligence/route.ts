@@ -2,9 +2,10 @@ import { NextRequest, NextResponse } from "next/server";
 import { analyzeYieldsWithVenice } from "@/lib/venice/analyst";
 import { searchCryptoYields, searchCryptoNews } from "@/lib/tavily/client";
 import { searchProtocolYields } from "@/lib/exa/client";
+import { intelligenceCache, INTELLIGENCE_TTL_MS } from "@/lib/agent/cache";
 
 const PRICE_USDC = 0.01;
-const NETWORK_ID = "eip155:84532"; // Base Sepolia
+const NETWORK_ID = "eip155:8453"; // Base mainnet
 const PAY_TO = (
   process.env.CLOVE_PAY_TO_ADDRESS ??
   process.env.NEXT_PUBLIC_CLOVE_SESSION_ADDRESS ??
@@ -17,13 +18,13 @@ async function build402Response() {
   let facilitators: string[] = [];
   try {
     const res = await fetch(
-      "https://tx-sentinel-base-sepolia.api.cx.metamask.io/platform/v2/x402",
+      "https://tx-sentinel-base-mainnet.api.cx.metamask.io/platform/v2/x402",
       { signal: AbortSignal.timeout(3000) }
     );
     if (res.ok) {
       const data = await res.json();
       facilitators = [
-        ...(data?.signers?.["eip155:84532"] ?? []),
+        ...(data?.signers?.["eip155:8453"] ?? []),
         ...(data?.signers?.["eip155:*"] ?? []),
       ];
     }
@@ -53,13 +54,31 @@ async function build402Response() {
 }
 
 async function verifyPayment(paymentSig: string): Promise<boolean> {
-  // Parse the payment payload to determine if it's a real on-chain settlement
-  // or a demo/ERC-7710 delegation payment.
+  // Bug 6 fix: random strings / "demo-internal" sentinels must not pass.
+  // The payment must at minimum be a valid base64-encoded JSON object with
+  // a permissionContext that looks like a real ERC-7710 delegation chain.
   let payload: Record<string, unknown> = {};
   try {
     payload = JSON.parse(Buffer.from(paymentSig, "base64").toString("utf-8"));
   } catch {
-    return true; // malformed — treat as demo
+    return false; // malformed base64 or JSON → reject
+  }
+
+  // Must contain a payload object with a permissionContext
+  const inner = payload.payload as Record<string, unknown> | undefined;
+  const permCtx = inner?.permissionContext as string | undefined;
+  const hasValidContext = typeof permCtx === "string" &&
+    permCtx.startsWith("0x") &&
+    permCtx.length > 20 &&
+    !permCtx.toLowerCase().includes("demo");
+
+  // Also allow internal server-to-server calls using the CLOVE_INTERNAL_SECRET
+  const isInternalCall = typeof payload.internalSecret === "string" &&
+    payload.internalSecret === process.env.CLOVE_INTERNAL_SECRET &&
+    !!process.env.CLOVE_INTERNAL_SECRET;
+
+  if (!hasValidContext && !isInternalCall) {
+    return false;
   }
 
   // Real on-chain payments (e.g., exact EVM scheme) have a txHash in the payload.
@@ -112,6 +131,17 @@ export async function GET(request: NextRequest) {
 
   const valid = await verifyPayment(paymentSig);
   if (!valid) return NextResponse.json({ error: "Invalid payment" }, { status: 402 });
+
+  // ── Cache hit? Return same intel for 5 min — DeFi yields don't change faster ──
+  // PROTO-2 fix: key by 5-minute UTC bucket so:
+  //   a) A bad/stale Venice response only poisons the current bucket, not all future ones
+  //   b) Errors are NEVER cached (only successful responses with bestApy > 0 are stored)
+  const bucket = Math.floor(Date.now() / INTELLIGENCE_TTL_MS);
+  const CACHE_KEY = `intel:base:${bucket}`;
+  const cached = intelligenceCache.get(CACHE_KEY) as Record<string, unknown> | undefined;
+  if (cached) {
+    return NextResponse.json({ ...cached, _cached: true });
+  }
 
   // ── Run all intelligence sources in parallel ──────────────────────────────
   const [veniceResult, tavilyResult, exaResult, newsResult] = await Promise.allSettled([
@@ -184,6 +214,12 @@ export async function GET(request: NextRequest) {
       timestamp: Date.now(),
     },
   };
+
+  // PROTO-2 fix: only cache if Venice returned a real APY (> 0).
+  // A rate-limited or errored Venice response has bestApy: 0 — don't cache it.
+  if ((response.bestApy as number) > 0) {
+    intelligenceCache.set(CACHE_KEY, response, INTELLIGENCE_TTL_MS);
+  }
 
   return NextResponse.json(response, {
     headers: { "Access-Control-Expose-Headers": "PAYMENT-REQUIRED, PAYMENT-RESPONSE" },

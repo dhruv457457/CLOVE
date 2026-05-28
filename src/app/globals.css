@@ -1,194 +1,177 @@
 @import "tailwindcss";
 
+/* ─────────────────────────────────────────────────────────
+   CLOVE — Quiet luxury design system
+   Paper (#F4F1EA) for marketing · Ink (#0B0C09) for app
+   One jolt of acid lime #C8FF3D
+   Geist + Instrument Serif italic
+───────────────────────────────────────────────────────── */
 @theme {
-  /* ── Black + Emerald #10B981 + Amber #F59E0B ── */
-  --color-bg-base:        #000000;
-  --color-bg-card:        #0a0a0a;
-  --color-bg-nav:         rgba(0,0,0,0.85);
-  --color-bg-sidebar:     #0a0a0a;
+  /* Paper palette (light/marketing surface) */
+  --color-paper:      #F4F1EA;
+  --color-paper-2:    #ECE8DE;
+  --color-paper-3:    #E2DDD0;
 
-  --color-emerald:        #10B981;
-  --color-emerald-bright: #34D399;
-  --color-emerald-dim:    #059669;
-  --color-emerald-glow:   rgba(16,185,129,0.18);
+  /* Ink palette (dark/app surface) */
+  --color-ink:        #0B0C09;
+  --color-ink-1:      #111210;
+  --color-ink-2:      #15170F;
+  --color-ink-3:      #1C1E16;
+  --color-ink-soft:   #2B2D27;
 
-  --color-amber:          #F59E0B;
-  --color-amber-bright:   #FBBF24;
+  /* Mid grays */
+  --color-mid:        #6B6A60;
+  --color-mid-2:      #908E81;
 
-  --color-border:         rgba(255,255,255,0.07);
-  --color-border-emerald: rgba(16,185,129,0.2);
+  /* Lines */
+  --color-line-light:        rgba(14,15,12,0.12);
+  --color-line-light-soft:   rgba(14,15,12,0.06);
+  --color-line-dark:         rgba(244,241,234,0.06);
+  --color-line-dark-mid:     rgba(244,241,234,0.11);
+  --color-line-dark-strong:  rgba(244,241,234,0.18);
 
-  --color-text-primary:   #ffffff;
-  --color-text-secondary: rgba(255,255,255,0.55);
-  --color-text-muted:     rgba(255,255,255,0.25);
+  /* Text on dark */
+  --color-text-on-dark:      #E8E5DA;
+  --color-text-on-dark-2:    #B5B2A5;
 
-  --font-sans: var(--font-inter), system-ui, sans-serif;
-  --font-mono: var(--font-mono), "IBM Plex Mono", "Courier New", monospace;
+  /* Accent — used sparingly */
+  --color-accent:      #C8FF3D;
+  --color-accent-ink:  #0B0C09;
+  --color-accent-soft: rgba(200,255,61,0.18);
+  --color-accent-glow: rgba(200,255,61,0.35);
 
-  @keyframes dash-flow {
-    to { stroke-dashoffset: -24; }
-  }
+  /* Other state colors */
+  --color-warn:    #FF8A66;
+  --color-moss:    #3A4A2E;
+  --color-moss-2:  #5A6F44;
+
+  /* ── Back-compat aliases (so existing components don't break) ── */
+  --color-bg-base:        var(--color-ink);
+  --color-bg-card:        var(--color-ink-1);
+  --color-bg-nav:         rgba(11,12,9,0.85);
+  --color-bg-sidebar:     var(--color-ink);
+
+  --color-emerald:        var(--color-accent);
+  --color-emerald-bright: var(--color-accent);
+  --color-emerald-dim:    #8FCC2D;
+  --color-emerald-glow:   var(--color-accent-glow);
+
+  --color-amber:          var(--color-warn);
+  --color-amber-bright:   #FFB37A;
+
+  --color-border:         var(--color-line-dark);
+  --color-border-emerald: rgba(200,255,61,0.2);
+
+  --color-text-primary:   var(--color-text-on-dark);
+  --color-text-secondary: var(--color-text-on-dark-2);
+  --color-text-muted:     var(--color-mid);
+
+  /* Fonts */
+  --font-sans:   var(--font-geist), ui-sans-serif, system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+  --font-serif:  var(--font-instrument), "Times New Roman", serif;
+  --font-mono:   ui-monospace, "SF Mono", Menlo, "Courier New", monospace;
+
+  /* Radii */
+  --radius-xs: 6px;
+  --radius-sm: 10px;
+  --radius-md: 14px;
+  --radius-lg: 22px;
+  --radius-xl: 32px;
+
+  @keyframes dash-flow      { to { stroke-dashoffset: -24; } }
+  @keyframes flow-stream    { to { stroke-dashoffset: -20; } }
   @keyframes node-glow {
-    0%, 100% { box-shadow: 0 0 0 0 rgba(16,185,129,0); }
-    50%       { box-shadow: 0 0 22px 4px rgba(16,185,129,0.2); }
+    0%, 100% { box-shadow: 0 0 0 0 rgba(200,255,61,0); }
+    50%      { box-shadow: 0 0 22px 4px rgba(200,255,61,0.18); }
   }
-  @keyframes terminal-blink {
-    0%, 100% { opacity: 1; }
-    50%       { opacity: 0; }
+  @keyframes pulse-dot {
+    0%, 100% { transform: scale(1); opacity: 1; }
+    50%      { transform: scale(1.4); opacity: 0.6; }
   }
+  @keyframes terminal-blink { 0%,100%{opacity:1} 50%{opacity:0} }
+  @keyframes rise           { from{transform:translateY(110%)} to{transform:translateY(0)} }
+  @keyframes slide          { from{transform:translateX(0)} to{transform:translateX(-100%)} }
+  @keyframes breathe        { 0%,100%{transform:scale(1)} 50%{transform:scale(1.04)} }
 }
 
-/* ── Base ── */
-:root { background-color: #000000; color: #ffffff; }
-body  {
-  background-color: #000000;
-  color: #ffffff;
-  overflow-x: hidden;
-  font-family: var(--font-inter), system-ui, sans-serif;
+/* ─────────── Base ─────────── */
+:root {
+  background-color: var(--color-ink);
+  color: var(--color-text-on-dark);
+  --serif: var(--font-instrument), "Times New Roman", serif;
+  --sans:  var(--font-geist), ui-sans-serif, system-ui, sans-serif;
+  --paper: #F4F1EA;
+  --paper-2: #ECE8DE;
+  --paper-3: #E2DDD0;
+  --ink: #0B0C09;
+  --ink-1: #111210;
+  --ink-2: #15170F;
+  --ink-3: #1C1E16;
+  --ink-soft: #2B2D27;
+  --mid: #6B6A60;
+  --mid-2: #908E81;
+  --line: rgba(14,15,12,0.12);
+  --line-soft: rgba(14,15,12,0.06);
+  --line-dark: rgba(244,241,234,0.06);
+  --line-dark-mid: rgba(244,241,234,0.11);
+  --line-dark-strong: rgba(244,241,234,0.18);
+  --text: #E8E5DA;
+  --text-2: #B5B2A5;
+  --accent: #C8FF3D;
+  --accent-ink: #0B0C09;
+  --accent-soft: rgba(200,255,61,0.18);
+  --accent-glow: rgba(200,255,61,0.35);
+  --warn: #FF8A66;
 }
 
-/* ── Scrollbar ── */
-::-webkit-scrollbar { width: 5px; height: 5px; }
-::-webkit-scrollbar-track { background: rgba(0,0,0,0.5); }
-::-webkit-scrollbar-thumb {
-  background: rgba(16,185,129,0.3);
-  border-radius: 9999px;
+html, body {
+  margin: 0;
+  padding: 0;
+  font-family: var(--sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
-::-webkit-scrollbar-thumb:hover { background: rgba(16,185,129,0.55); }
+body {
+  background-color: var(--ink);
+  color: var(--text);
+}
+::selection { background: var(--accent); color: var(--accent-ink); }
 
-/* ── Glass card ── */
-.glass-card {
-  background: rgba(10,10,10,0.85);
-  border: 1px solid rgba(255,255,255,0.07);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
-}
-.glass-card-emerald {
-  background: rgba(0,0,0,0.75);
-  border: 1px solid rgba(16,185,129,0.18);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
-  box-shadow: 0 0 60px rgba(16,185,129,0.05), inset 0 1px 0 rgba(16,185,129,0.08);
-}
+/* Pages mark themselves as paper or ink */
+.surface-paper { background: var(--paper); color: var(--ink); }
+.surface-paper body, body.surface-paper { background: var(--paper); color: var(--ink); }
+.surface-ink   { background: var(--ink);   color: var(--text); }
 
-/* ── Workflow node ── */
-.workflow-node {
-  border: 1px solid rgba(16,185,129,0.2);
-  background: #0a0a0a;
-  border-radius: 12px;
-  transition: border-color 0.25s, box-shadow 0.25s;
-}
-.workflow-node:hover {
-  border-color: rgba(16,185,129,0.55);
-  box-shadow: 0 0 28px rgba(16,185,129,0.12);
-}
+/* Helpers */
+.serif-italic { font-family: var(--serif); font-style: italic; font-weight: 400; letter-spacing: -0.01em; }
+.tickup       { font-variant-numeric: tabular-nums; }
 
-/* ── Buttons ── */
-.btn-amber {
-  background: #F59E0B;
-  color: #000000;
-  font-weight: 700;
-  border-radius: 9999px;
-  padding: 0.65rem 1.75rem;
-  font-size: 0.875rem;
-  letter-spacing: -0.01em;
-  transition: background 0.2s, box-shadow 0.2s, transform 0.15s;
-  box-shadow: 0 0 24px rgba(245,158,11,0.35);
-}
-.btn-amber:hover {
-  background: #FBBF24;
-  box-shadow: 0 0 36px rgba(245,158,11,0.5);
-  transform: translateY(-1px);
-}
-.btn-emerald {
-  background: #10B981;
-  color: #000000;
-  font-weight: 700;
-  border-radius: 9999px;
-  padding: 0.65rem 1.75rem;
-  font-size: 0.875rem;
-  transition: background 0.2s, box-shadow 0.2s;
-  box-shadow: 0 0 24px rgba(16,185,129,0.3);
-}
-.btn-emerald:hover {
-  background: #34D399;
-  box-shadow: 0 0 36px rgba(16,185,129,0.45);
-}
-.btn-glass {
-  border: 1px solid rgba(255,255,255,0.12);
-  color: rgba(255,255,255,0.65);
-  border-radius: 9999px;
-  padding: 0.65rem 1.75rem;
-  font-size: 0.875rem;
-  font-weight: 600;
-  background: rgba(255,255,255,0.04);
-  backdrop-filter: blur(8px);
-  transition: border-color 0.2s, color 0.2s, background 0.2s;
-}
-.btn-glass:hover {
-  border-color: rgba(255,255,255,0.22);
-  color: #ffffff;
-  background: rgba(255,255,255,0.08);
-}
+/* ─────────── Scrollbar ─────────── */
+::-webkit-scrollbar              { width: 6px; height: 6px; }
+::-webkit-scrollbar-track        { background: transparent; }
+::-webkit-scrollbar-thumb        { background: rgba(244,241,234,0.08); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover  { background: rgba(244,241,234,0.16); }
 
-/* ── Section label ── */
-.section-label {
-  font-size: 0.65rem;
-  font-weight: 600;
-  letter-spacing: 0.18em;
-  text-transform: uppercase;
-  color: #10B981;
-  font-family: var(--font-mono);
+/* ─────────── ReactFlow node + edge tokens for new dark canvas ─────────── */
+.react-flow__node {
+  background: var(--ink-1);
+  border: 1px solid var(--line-dark-mid);
+  color: var(--text);
 }
+.react-flow__node.selected,
+.react-flow__node.selectable.selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent), 0 12px 28px -16px var(--accent-glow);
+}
+.react-flow__edge-path { stroke: rgba(244,241,234,0.10); }
+.react-flow__edge.active .react-flow__edge-path,
+.react-flow__edge.flowing .react-flow__edge-path {
+  stroke: var(--accent);
+  stroke-width: 1.25;
+  stroke-dasharray: 3 7;
+  animation: flow-stream 1.8s linear infinite;
+}
+.react-flow__background pattern circle { fill: rgba(244,241,234,0.06); }
 
-/* ── Dot grid (subtle) ── */
-.dot-grid {
-  background-image: radial-gradient(rgba(255,255,255,0.04) 1px, transparent 1px);
-  background-size: 32px 32px;
-}
-
-/* ── Code block ── */
-.code-block {
-  background: rgba(0,0,0,0.9);
-  border: 1px solid rgba(16,185,129,0.12);
-  border-radius: 12px;
-  font-family: var(--font-mono);
-  font-size: 0.78rem;
-  line-height: 1.8;
-  padding: 1.25rem 1.5rem;
-  color: rgba(16,185,129,0.7);
-}
-.code-keyword  { color: #10B981; }
-.code-function { color: #34D399; }
-.code-string   { color: #6EE7B7; }
-.code-comment  { color: rgba(255,255,255,0.2); }
-.code-value    { color: #F59E0B; }
-
-/* ── Dashboard specific ── */
-.btn-primary {
-  background: #10B981;
-  color: #000000;
-  font-weight: 700;
-  border-radius: 9999px;
-  padding: 0.55rem 1.5rem;
-  font-size: 0.85rem;
-  transition: background 0.2s, box-shadow 0.2s;
-}
-.btn-primary:hover {
-  background: #34D399;
-  box-shadow: 0 0 28px rgba(16,185,129,0.4);
-}
-.btn-outline {
-  border: 1px solid rgba(255,255,255,0.1);
-  color: rgba(255,255,255,0.5);
-  border-radius: 9999px;
-  padding: 0.55rem 1.5rem;
-  font-size: 0.85rem;
-  font-weight: 600;
-  background: transparent;
-  transition: border-color 0.2s, color 0.2s;
-}
-.btn-outline:hover {
-  border-color: rgba(16,185,129,0.4);
-  color: #ffffff;
-}
+/* ─────────── Hide old terminal/loud styles that the design rejects ─────────── */
+/* No mono terminal logs anywhere — refined sans only. */

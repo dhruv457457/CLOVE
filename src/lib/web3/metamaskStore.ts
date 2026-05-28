@@ -5,13 +5,15 @@ import {
   getConnectedAccounts,
   requestUsdcPermission,
   revokePermissionOnChain,
-  savePermission,
-  loadPermission,
-  clearPermission,
   type GrantedPermission,
   type RevocationResult,
 } from "./permissions";
-import { terminalStore } from "@/lib/walletEmulator";
+// Lightweight no-op terminal logger (replaces deleted walletEmulator)
+const terminalStore = {
+  addLog(_type: "info" | "success" | "warning" | "error" | "meta", message: string) {
+    if (typeof console !== "undefined") console.log(`[mm:${_type}]`, message);
+  },
+};
 
 export type MetaMaskMode = "disconnected" | "connecting" | "connected" | "flask";
 
@@ -32,7 +34,7 @@ class MetaMaskStore {
     isFlask: true,
     userAddress: null,
     sessionAddress: null,
-    permission: loadPermission(),
+    permission: null,   // loaded async from MongoDB after wallet connects
     isRevoking: false,
   };
 
@@ -63,7 +65,12 @@ class MetaMaskStore {
     };
     this.notify();
 
-    if (userAddress) await this.fetchSessionAddress();
+    if (userAddress) {
+      await Promise.all([
+        this.fetchSessionAddress(),
+        this.fetchPermissionFromDb(userAddress),
+      ]);
+    }
   }
 
   async connect() {
@@ -82,12 +89,51 @@ class MetaMaskStore {
       };
       this.notify();
       this.log("success", `Connected: ${address}`);
-      await this.fetchSessionAddress();
+      await Promise.all([
+        this.fetchSessionAddress(),
+        this.fetchPermissionFromDb(address),
+      ]);
     } catch (e) {
       this.log("error", `Connection failed: ${e instanceof Error ? e.message : e}`);
       this.state = { ...this.state, mode: "disconnected" };
       this.notify();
     }
+  }
+
+  /** Load the stored ERC-7715 permission from MongoDB for the given wallet. */
+  private async fetchPermissionFromDb(walletAddress: `0x${string}`) {
+    try {
+      const res = await fetch(`/api/permission?wallet=${encodeURIComponent(walletAddress)}`);
+      if (!res.ok) return;
+      const data = await res.json() as { permission: GrantedPermission | null };
+      if (data.permission) {
+        this.state = { ...this.state, permission: data.permission };
+        this.notify();
+        this.log("info", `Permission loaded from DB (${data.permission.budgetUsdc} USDC)`);
+      }
+    } catch { /* non-fatal */ }
+  }
+
+  /** Persist permission to MongoDB (server-side). */
+  private async persistPermissionToDb(permission: GrantedPermission) {
+    const wallet = this.state.userAddress;
+    if (!wallet) return;
+    try {
+      await fetch("/api/permission", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ walletAddress: wallet, permission }),
+      });
+    } catch { /* non-fatal */ }
+  }
+
+  /** Delete permission from MongoDB. */
+  private async deletePermissionFromDb() {
+    const wallet = this.state.userAddress;
+    if (!wallet) return;
+    try {
+      await fetch(`/api/permission?wallet=${encodeURIComponent(wallet)}`, { method: "DELETE" });
+    } catch { /* non-fatal */ }
   }
 
   private async fetchSessionAddress() {
@@ -117,16 +163,17 @@ class MetaMaskStore {
         justification
       );
 
-      savePermission(permission);
+      // Persist to MongoDB first (authoritative store)
+      await this.persistPermissionToDb(permission);
       this.state = { ...this.state, permission };
       this.notify();
 
       this.log("success", `ERC-7715 permission granted!`);
-      this.log("meta", `Context: ${permission.permissionsContext.slice(0, 32)}…`);
+      this.log("meta", `Context (${permission.permissionsContext.length} chars): ${permission.permissionsContext.slice(0, 18)}…${permission.permissionsContext.slice(-16)}`);
       this.log("meta", `DelegationManager: ${permission.delegationManager}`);
       this.log("meta", `Expires: ${new Date(permission.expiresAt * 1000).toLocaleDateString()}`);
 
-      // Store in 1Shot API (best-effort)
+      // Store in 1Shot API (best-effort) — update DB if we get a delegationId back
       fetch("/api/x402/store-delegation", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -136,11 +183,11 @@ class MetaMaskStore {
         }),
       })
         .then(r => r.json())
-        .then(d => {
+        .then(async d => {
           if (d.delegationId) {
             this.log("meta", `Stored in 1Shot: ${d.delegationId}`);
             const updated = { ...permission, delegationId: d.delegationId };
-            savePermission(updated);
+            await this.persistPermissionToDb(updated);
             this.state = { ...this.state, permission: updated };
             this.notify();
           }
@@ -162,7 +209,7 @@ class MetaMaskStore {
 
     try {
       const result = await revokePermissionOnChain(permission, userAddress);
-      clearPermission();
+      await this.deletePermissionFromDb();
       this.state = { ...this.state, permission: null, isRevoking: false };
       this.notify();
       this.log("success", `Delegation revoked on-chain ✓`);
@@ -178,14 +225,13 @@ class MetaMaskStore {
   }
 
   clearLocalPermission() {
-    clearPermission();
+    void this.deletePermissionFromDb();   // best-effort, non-blocking
     this.state = { ...this.state, permission: null };
-    this.log("warning", "Permission cleared locally (not revoked on-chain).");
+    this.log("warning", "Permission cleared (removed from DB, not revoked on-chain).");
     this.notify();
   }
 
   disconnect() {
-    clearPermission();
     this.state = {
       mode: "disconnected",
       isFlask: true,

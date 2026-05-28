@@ -1,22 +1,25 @@
 import type { Metadata } from "next";
-import { Inter, IBM_Plex_Mono } from "next/font/google";
+import { Geist, Instrument_Serif } from "next/font/google";
 import "./globals.css";
+import { WalletAutoInit } from "@/components/WalletAutoInit";
 
-const inter = Inter({
-  variable: "--font-inter",
+const geist = Geist({
+  variable: "--font-geist",
   subsets: ["latin"],
+  weight: ["300", "400", "500", "600", "700"],
   display: "swap",
 });
 
-const ibmPlexMono = IBM_Plex_Mono({
-  variable: "--font-mono",
+const instrumentSerif = Instrument_Serif({
+  variable: "--font-instrument",
   subsets: ["latin"],
-  weight: ["400", "500", "600"],
+  weight: ["400"],
+  style: ["normal", "italic"],
   display: "swap",
 });
 
 export const metadata: Metadata = {
-  title: "CLOVE — Autonomous Capital Execution",
+  title: "CLOVE — Autonomous capital, quietly.",
   description:
     "AI agents that research markets, pay for intelligence, and execute onchain strategies autonomously. One ERC-7715 permission. Fully non-custodial.",
 };
@@ -27,16 +30,10 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={`${inter.variable} ${ibmPlexMono.variable} h-full antialiased`}
+      className={`${geist.variable} ${instrumentSerif.variable} h-full antialiased`}
     >
-      {/* Satoshi from Fontshare for headings */}
-      <head>
-        <link
-          href="https://api.fontshare.com/v2/css?f[]=satoshi@700,800,900&display=swap"
-          rel="stylesheet"
-        />
-      </head>
-      <body className="min-h-full flex flex-col bg-black text-white">
+      <body className="min-h-full flex flex-col">
+        <WalletAutoInit />
         {children}
       </body>
     </html>

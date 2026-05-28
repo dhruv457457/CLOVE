@@ -170,8 +170,9 @@ export async function POST(request: NextRequest) {
     payload: {
       delegationManager: delegationManager ?? "0x",
       permissionContext,
-      delegator:
-        process.env.NEXT_PUBLIC_CLOVE_SESSION_ADDRESS ?? "0x5fA306c23C731039a998215f3432205Df8A34cF1",
+      // Bug 7 fix: never fall back to a publicly known Hardhat address.
+      // If the session address env var is missing, the payment is unsigned/demo.
+      delegator: process.env.NEXT_PUBLIC_CLOVE_SESSION_ADDRESS ?? "0x",
       timestamp: Date.now(),
       nonce: Math.random().toString(36).slice(2),
     },

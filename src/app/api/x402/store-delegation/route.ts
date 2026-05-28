@@ -29,6 +29,20 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Missing permissionsContext or expiresAt" }, { status: 400 });
   }
 
+  // Bug 10 fix: validate context server-side — mirrors client-side loadPermission() checks.
+  // A demo/stale context stored in 1Shot causes silent failures when redelegate is called.
+  const ctx = body.permissionsContext;
+  if (
+    !ctx.startsWith("0x") ||
+    ctx.length < 40 ||
+    ctx.toLowerCase().includes("demo")
+  ) {
+    return NextResponse.json(
+      { error: "Invalid permissionsContext — must be a real ERC-7715 delegation" },
+      { status: 400 }
+    );
+  }
+
   try {
     const delegationId = await storeDelegation(body.permissionsContext, body.expiresAt);
     return NextResponse.json({ delegationId, stored: true });
