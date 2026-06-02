@@ -114,25 +114,23 @@ export async function getRelayStatus(taskId: string): Promise<{
 
 // ── Main execution function ────────────────────────────────────────────────────
 
+export interface RelayWorkExecution {
+  target: `0x${string}`;
+  data:   `0x${string}`;
+  value?: string;
+}
+
 export interface RelayExecutionParams {
-  /** Stored ERC-7715 permissionsContext from the user's MetaMask grant */
+  /** Stored permissionsContext from the user's FunctionCall-scoped grant */
   userPermissionsContext: string;
   /**
-   * Recipient of the delegated USDC transfer (the "work" execution).
-   * The erc20-token-periodic permission only authorizes USDC.transfer(),
-   * so the on-chain action is a delegated transfer to this address.
+   * The protocol "work" calls to execute on the user's behalf (e.g. approve +
+   * supply). The relayer fee transfer is prepended automatically. Each target
+   * + method must be allowed by the delegation's AllowedTargets/AllowedMethods.
    */
-  recipient: `0x${string}`;
-  /** USDC amount to transfer (the delegated movement) */
-  workAmountUsdc: number;
+  workExecutions: RelayWorkExecution[];
   /** Human-readable memo (for debugging) */
   memo?: string;
-
-  // ── Deprecated (contract-call mode — blocked by periodic enforcer) ──────────
-  /** @deprecated periodic permission can't call contracts; use `recipient` */
-  targetContract?: `0x${string}`;
-  /** @deprecated periodic permission can't call contracts */
-  calldata?: `0x${string}`;
 }
 
 export interface RelayExecutionResult {
@@ -165,8 +163,7 @@ export async function executeViaPublicRelayer(
 ): Promise<RelayExecutionResult> {
   const {
     userPermissionsContext,
-    recipient,
-    workAmountUsdc,
+    workExecutions,
     memo = "CLOVE agent execution",
   } = params;
 
@@ -177,8 +174,6 @@ export async function executeViaPublicRelayer(
   // Charge the relayer's quoted minFee + small buffer, floored at 0.01 — not a fixed 0.05.
   const feeUsdc    = Math.max(minFeeUsdc * RELAY_FEE_BUFFER, RELAY_FEE_FLOOR_USDC);
   const feeAtoms   = parseUnits(feeUsdc.toFixed(6), 6);
-  // Note: workAtoms declared inside bundle section below; referenced here for clarity.
-  // The delegation scope (set by the user at grant time) must cover feeAtoms + workAtoms.
 
   // ── 2. Decode the user's delegation ───────────────────────────────────────
   // The user granted ERC-7715 directly to the relayer's targetAddress.
@@ -198,25 +193,18 @@ export async function executeViaPublicRelayer(
     }
   }
 
-  // ── 3. Build execution bundle (transfer-only) ─────────────────────────────
-  // The erc20-token-periodic permission's on-chain enforcer
-  // (ERC20PeriodTransferEnforcer) ONLY authorizes USDC.transfer(). It rejects
-  // approve() and any contract call with "invalid-method". So both executions
-  // in the bundle are transfers:
-  //   1. fee  → relayer feeCollector (gas paid in USDC)
-  //   2. work → recipient (the delegated movement of funds)
+  // ── 3. Build execution bundle ─────────────────────────────────────────────
+  // The FunctionCall-scoped delegation allows USDC.transfer/approve + protocol
+  // methods. Bundle = [fee transfer] + [work calls (approve + supply/deposit/swap)].
   const erc20Abi = [
     { name: "transfer", type: "function", inputs: [{ name: "to", type: "address" }, { name: "amount", type: "uint256" }], outputs: [{ type: "bool" }], stateMutability: "nonpayable" },
   ] as const;
 
-  const workAtoms = parseUnits(String(workAmountUsdc), 6);
-
-  const feeCalldata  = encodeFunctionData({ abi: erc20Abi, functionName: "transfer", args: [FEE_COLLECTOR, feeAtoms] });
-  const workCalldata = encodeFunctionData({ abi: erc20Abi, functionName: "transfer", args: [recipient,    workAtoms] });
+  const feeCalldata = encodeFunctionData({ abi: erc20Abi, functionName: "transfer", args: [FEE_COLLECTOR, feeAtoms] });
 
   const executions = [
-    { target: USDC, value: "0", data: feeCalldata  }, // gas fee in USDC
-    { target: USDC, value: "0", data: workCalldata }, // delegated USDC transfer
+    { target: USDC, value: "0", data: feeCalldata }, // relayer gas fee in USDC
+    ...workExecutions.map(w => ({ target: w.target, value: w.value ?? "0", data: w.data })),
   ];
 
   // ── 4. Submit to relayer ──────────────────────────────────────────────────

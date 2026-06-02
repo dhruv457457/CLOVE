@@ -8,6 +8,7 @@ import {
   toMetaMaskSmartAccount,
   Implementation,
   createDelegation,
+  ScopeType,
 } from "@metamask/smart-accounts-kit";
 import { CHAIN, USDC_ADDRESS } from "./config";
 
@@ -15,6 +16,13 @@ import { CHAIN, USDC_ADDRESS } from "./config";
 const USDC_POLYGON = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359" as const;
 // Polygon mainnet chain ID
 const POLYGON_CHAIN_ID = 137;
+
+// ── Base mainnet DeFi protocol contracts (for FunctionCall-scoped delegation) ──
+const RELAYER_TARGET   = "0x26a529124f0bbf9af9d8f9f84a43efe47cf1199a" as `0x${string}`;
+const AAVE_V3_POOL     = "0xA238Dd80C259a72e81d7e4664a9801593F98d1c5" as `0x${string}`;
+const MORPHO_MOONWELL  = "0xc1256Ae5FF1cf2719D4937adb3bbCCab2E00A2Ca" as `0x${string}`;
+const UNISWAP_ROUTER   = "0x2626664c2603336E57B271c5C0b26F421741e481" as `0x${string}`;
+const AERODROME_ROUTER = "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43" as `0x${string}`;
 
 declare global {
   interface Window {
@@ -271,28 +279,87 @@ async function signDelegationManually(
 }
 
 /**
- * Request an ERC-7715 permission scoped for the 1Shot Public Relayer.
+ * Request a DeFi-scoped delegation for the 1Shot Public Relayer.
  *
- * For the public relayer path, the user grants directly TO the relayer's
- * targetAddress (0x26a5…). No sub-delegation is needed — the bundle
- * includes both the USDC fee and the DeFi action.
+ * Unlike the erc20-token-periodic permission (which only allows USDC.transfer
+ * and CANNOT call protocols), this uses a FunctionCall-scoped delegation that
+ * authorizes the relayer to call:
+ *   - USDC.transfer  (relayer gas fee)
+ *   - USDC.approve   (let the protocol pull USDC)
+ *   - Aave.supply / Morpho.deposit / Uniswap & Aerodrome swap
+ * on the protocol contracts. This is what enables REAL on-chain deposits.
  *
- * This is a SEPARATE grant from the executeAsDelegator grant (which goes
- * to the 1Shot wallet 0x7195…). Both can coexist independently.
+ * Built via createDelegation (FunctionCall scope → AllowedTargets +
+ * AllowedMethods + ValueLte caveats) and signed via the user's Stateless7702
+ * smart account (so delegator == EOA, keeping revocation simple).
+ *
+ * The user signs a standard MetaMask "Sign data" dialog — no Flask needed.
  */
 export async function requestRelayerPermission(
   budgetUsdc: string,
   periodDays: number,
 ): Promise<GrantedPermission> {
-  // Relayer's targetAddress on Base mainnet (from relayer_getCapabilities)
-  const RELAYER_TARGET = "0x26a529124f0bbf9af9d8f9f84a43efe47cf1199a" as `0x${string}`;
-  return requestUsdcPermission(
-    RELAYER_TARGET,
+  if (!window.ethereum) throw new Error("MetaMask not found");
+
+  // Connect + ensure Base mainnet
+  const accounts = await window.ethereum.request({ method: "eth_requestAccounts" }) as string[];
+  const userEoa = accounts[0] as `0x${string}`;
+  if (!userEoa) throw new Error("No account connected in MetaMask");
+  await window.ethereum.request({
+    method: "wallet_switchEthereumChain",
+    params: [{ chainId: `0x${CHAIN.id.toString(16)}` }],
+  }).catch(() => {});
+
+  const environment  = getSmartAccountsEnvironment(CHAIN.id);
+  const publicClient = createPublicClient({ chain: CHAIN, transport: http() });
+  const walletClient = createWalletClient({ account: userEoa, transport: custom(window.ethereum) });
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const smartAccount = await toMetaMaskSmartAccount({
+    client:         publicClient as any,
+    implementation: Implementation.Stateless7702,
+    address:        userEoa,                 // smart account address == EOA
+    signer:         { walletClient: walletClient as any },
+  });
+
+  // FunctionCall scope: which contracts + which methods the relayer may call.
+  const delegation = createDelegation({
+    from:  smartAccount.address,
+    to:    RELAYER_TARGET,
+    environment,
+    salt:  `0x${Date.now().toString(16).padStart(64, "0")}` as `0x${string}`,
+    scope: {
+      type: ScopeType.FunctionCall,
+      targets: [
+        USDC_ADDRESS as `0x${string}`,  // transfer (fee) + approve
+        AAVE_V3_POOL,                   // supply
+        MORPHO_MOONWELL,                // deposit (ERC-4626)
+        UNISWAP_ROUTER,                 // exactInputSingle
+        AERODROME_ROUTER,               // swapExactTokensForTokens
+      ],
+      selectors: [
+        "transfer(address,uint256)",
+        "approve(address,uint256)",
+        "supply(address,uint256,address,uint16)",            // Aave v3
+        "deposit(uint256,address)",                          // ERC-4626 (Morpho)
+        "exactInputSingle((address,address,uint24,address,uint256,uint256,uint160))", // Uniswap v3
+        "swapExactTokensForTokens(uint256,uint256,(address,address,bool,address)[],address,uint256)", // Aerodrome
+      ],
+    },
+  });
+
+  const signature   = await smartAccount.signDelegation({ delegation });
+  const signedDeleg = { ...delegation, signature };
+
+  return {
+    permissionsContext: encodeDelegations([signedDeleg]),
+    delegationManager:  environment.DelegationManager as `0x${string}`,
+    grantedTo:          RELAYER_TARGET,
     budgetUsdc,
     periodDays,
-    "CLOVE agents — pay for DeFi execution + gas in USDC via 1Shot Public Relayer",
-    CHAIN.id,
-  );
+    expiresAt:          Math.floor(Date.now() / 1000) + periodDays * 24 * 60 * 60,
+    chainId:            CHAIN.id,
+  };
 }
 
 /**

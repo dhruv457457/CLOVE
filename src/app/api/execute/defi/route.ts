@@ -278,25 +278,47 @@ export async function POST(request: NextRequest) {
     permissionsContext.length > 20;
 
   if (hasRealContext) {
-    // ── 1Shot Public Relayer — delegated USDC transfer ────────────────────────
-    // The erc20-token-periodic permission only authorizes USDC.transfer(), so the
-    // on-chain action is a delegated transfer of the budgeted USDC. Recipient is
-    // the user's own wallet (self-custody "savings"/position move) — a real
-    // ERC-7710 redemption relayed through the 1Shot permissionless mainnet relayer
-    // with gas paid in USDC. Qualifies for the relayer + x402 + A2A tracks.
-    //
-    // The protocol/yield layer (Venice + DeFiLlama) is the INTELLIGENCE; this is
-    // the executed on-chain MOVEMENT. True protocol deposits (approve+supply) need
-    // a FunctionCall-scoped delegation — see roadmap.
-    const transferRecipient = (nodeConfig.recipient as string | undefined)
-      ?? walletAddress;  // default: move to the user's own wallet
+    // ── 1Shot Public Relayer — REAL DeFi deposit (approve + supply/deposit/swap) ──
+    // The FunctionCall-scoped delegation authorizes the relayer to call USDC.approve
+    // + the protocol method. Bundle = [fee] + [approve] + [protocol action].
+    // Gas paid in USDC, relayed through the 1Shot permissionless mainnet relayer.
+    const USDC_ADDR = TOKENS.USDC[CHAIN.BASE] as `0x${string}`;
+
+    // approve(protocol, amount) — let the protocol pull USDC
+    const approveData = encodeFunctionData({
+      abi: ABIS.erc20Approve, functionName: "approve",
+      args: [registryEntry.contract, defaultAmount],
+    });
+
+    // The protocol action calldata
+    let workData: `0x${string}` = "0x";
+    switch (actionKey) {
+      case "morpho-vault-deposit":
+        workData = encodeFunctionData({ abi: ABIS.morphoVaultDeposit, functionName: "deposit", args: [defaultAmount, walletAddress as `0x${string}`] }); break;
+      case "aave-supply":
+        workData = encodeFunctionData({ abi: ABIS.aaveSupply, functionName: "supply", args: [USDC_ADDR, defaultAmount, walletAddress as `0x${string}`, 0] }); break;
+      case "uniswap-swap-exact-input":
+        workData = encodeFunctionData({ abi: ABIS.uniswapSwap, functionName: "exactInputSingle", args: [{ tokenIn: USDC_ADDR, tokenOut: TOKENS.WETH[CHAIN.BASE] as `0x${string}`, fee: 3000, recipient: walletAddress as `0x${string}`, amountIn: defaultAmount, amountOutMinimum: 0n, sqrtPriceLimitX96: 0n }] }); break;
+      case "aerodrome-swap-exact-tokens":
+        workData = encodeFunctionData({ abi: ABIS.aerodromeSwap, functionName: "swapExactTokensForTokens", args: [defaultAmount, 0n, [{ from: USDC_ADDR, to: TOKENS.AERO[CHAIN.BASE] as `0x${string}`, stable: false, factory: (AERODROME.poolFactory as Record<number, string>)[CHAIN.BASE] as `0x${string}` }], walletAddress as `0x${string}`, BigInt(Math.floor(Date.now() / 1000) + 1800)] }); break;
+      default:
+        workData = "0x"; // usdc-approve etc. — approve only
+    }
+
+    const workExecutions = workData !== "0x"
+      ? [
+          { target: USDC_ADDR,              data: approveData }, // approve protocol
+          { target: registryEntry.contract, data: workData    }, // deposit / supply / swap
+        ]
+      : [
+          { target: USDC_ADDR, data: approveData },              // approve-only action
+        ];
 
     try {
       const relayResult = await executeViaPublicRelayer({
         userPermissionsContext: permissionsContext,
-        recipient:              transferRecipient as `0x${string}`,
-        workAmountUsdc:         Number(defaultAmount) / 1e6,
-        memo:                   `CLOVE: ${actionKey} (delegated transfer)`,
+        workExecutions,
+        memo:                   `CLOVE: ${actionKey}`,
       });
       if (relayResult.status !== "failed") {
         return NextResponse.json({
@@ -305,7 +327,7 @@ export async function POST(request: NextRequest) {
           taskId:          relayResult.taskId,
           action:          actionKey,
           protocol,
-          recipient:       transferRecipient,
+          contractAddress: registryEntry.contract,
           amount:          defaultAmount.toString(),
           feeUsdc:         relayResult.feeUsdc,
           via:             "1shot-public-relayer",

@@ -3,7 +3,7 @@
 import {
   connectWallet,
   getConnectedAccounts,
-  requestUsdcPermission,
+  requestRelayerPermission,
   revokePermissionOnChain,
   type GrantedPermission,
   type RevocationResult,
@@ -150,15 +150,12 @@ class MetaMaskStore {
       return;
     }
 
-    this.log("info", `Requesting ERC-7715 permission: ${budgetUsdc} USDC / ${periodDays}-day period`);
+    this.log("info", `Requesting DeFi delegation: ${budgetUsdc} USDC / ${periodDays}-day period`);
 
     try {
-      const permission = await requestUsdcPermission(
-        this.state.sessionAddress,
-        budgetUsdc,
-        periodDays,
-        justification
-      );
+      // FunctionCall-scoped delegation → relayer can call approve + supply/deposit/swap.
+      // This is what enables REAL protocol deposits (not just transfers).
+      const permission = await requestRelayerPermission(budgetUsdc, periodDays);
 
       // Persist to MongoDB first (authoritative store)
       await this.persistPermissionToDb(permission);
