@@ -14,12 +14,35 @@ export type AgentStatus =
 export type AgentLastAction = "hold" | "deposit" | "rebalance" | "withdraw" | "skip" | null;
 export type MediaPolicy = "off" | "milestones" | "daily" | "every-run";
 
+/**
+ * The kind of agent — determines its tool set, system prompt, and target chain.
+ * Driven by the registry in src/lib/agent/agentTypes.ts (no hardcoded if-branches).
+ *   - "yield"       : generic DeFi yield agent (the original behavior)
+ *   - "polymarket"  : prediction-market bettor (runs on Polygon)
+ *   - "copy-trader" : mirrors on-chain whale trades (Base)
+ *   - "narrative"   : narrative-momentum trader, scans X for trending tokens
+ *   - "rebalancer"  : real yield rebalancer hitting DeFiLlama / Morpho / Aave directly
+ */
+export type AgentType =
+  | "yield"
+  | "polymarket"
+  | "copy-trader"
+  | "narrative"
+  | "rebalancer";
+
 export interface Agent {
   id:                string;
   walletAddress:     string;     // the human owner's wallet
   name:              string;
   goal:              string;
   status:            AgentStatus;
+
+  /** What kind of agent this is — drives tools, prompt, and chain. Default "yield". */
+  agentType?:        AgentType;
+  /** EVM chain this agent operates on. 8453 = Base (default), 137 = Polygon (Polymarket). */
+  chainId?:          number;
+  /** Agent-type-specific config (tracked wallets, edge threshold, topic, etc.). */
+  typeConfig?:       Record<string, unknown>;
   createdAt:         Date;
   lastRunAt:         Date | null;
   lastAction:        AgentLastAction;
@@ -110,6 +133,9 @@ export async function createAgent(input: {
   scheduleIntervalMs?: number;
   position?:           { x: number; y: number };
   workflowId?:         string | null;
+  agentType?:          AgentType;
+  chainId?:            number;
+  typeConfig?:         Record<string, unknown>;
 }): Promise<Agent> {
   const id = `agent_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 
@@ -142,6 +168,9 @@ export async function createAgent(input: {
     position:       input.position    ?? { x: 80 + Math.random() * 200, y: 80 + Math.random() * 200 },
     workflowId:     input.workflowId ?? null,
     onChainAddress,
+    agentType:      input.agentType ?? "yield",
+    chainId:        input.chainId   ?? 8453,
+    typeConfig:     input.typeConfig ?? {},
   };
   const db = await getDb();
   if (db) await db.collection<Agent>("agents").insertOne(agent);
@@ -297,13 +326,13 @@ export async function setDelegation(
   const db = await getDb();
   if (!db) return;
 
-  // A context is "real" if it is a long hex string with no "demo" marker
+  // A context is "real" if the permissionsContext is a genuine ERC-7715 hex blob.
+  // The hash may be "0xpending" (we don't have the EIP-712 hash yet) — that's fine,
+  // it only affects revocation lookup, not whether the agent can execute.
   const isRealContext =
     params.delegationContext.startsWith("0x") &&
     !params.delegationContext.includes("demo") &&
-    params.delegationContext.length > 40 &&
-    params.delegationHash !== "0xpending" &&
-    !params.delegationHash.includes("demo");
+    params.delegationContext.length > 40;
 
   const delegationStatus: Agent["delegationStatus"] = isRealContext ? "active" : "pending";
 

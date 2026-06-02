@@ -249,8 +249,8 @@ function DelegationSection({ agent }: { agent: Agent }) {
     MID;
 
   const statusLabel =
-    status === "active"  ? (isRealDelegation ? "active · real on-chain" : "active · demo only") :
-    status === "pending" ? "pending — grant ERC-7715 to activate" :
+    status === "active"  ? (isRealDelegation ? "active · real on-chain" : "needs permission — grant to run") :
+    status === "pending" ? "needs permission — grant ERC-7715 to activate" :
     status;
 
   return (

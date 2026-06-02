@@ -9,14 +9,13 @@ import { erc7710WalletActions } from "@metamask/smart-accounts-kit/actions";
 import { createPublicClient, createWalletClient, http, keccak256, encodePacked } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { CHAIN, USDC_ADDRESS } from "./config";
+import { getSessionPrivateKey } from "@/lib/config/env";
 
-// Session private key — stays server-side only.
-const SESSION_PRIVATE_KEY = (
-  process.env.CLOVE_SESSION_KEY ??
-  "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
-) as `0x${string}`;
-
-const rpcUrl = process.env.BASE_RPC ?? process.env.BASE_SEPOLIA_RPC ?? "https://mainnet.base.org";
+// RPC URL: explicit Base mainnet override, else the configured chain's own
+// default RPC. CLOVE runs on Base mainnet only — no testnet fallback.
+const rpcUrl =
+  process.env.BASE_RPC ??
+  CHAIN.rpcUrls.default.http[0];
 
 export const publicClient = createPublicClient({
   chain: CHAIN,
@@ -28,7 +27,7 @@ export const environment = getSmartAccountsEnvironment(CHAIN.id);
 // Bug 8 fix: don't singleton-cache — hot-reload and env changes invalidate this.
 // getSessionAccount() is called infrequently (revoke, redelegate), so no perf hit.
 export async function getSessionAccount() {
-  const signer = privateKeyToAccount(SESSION_PRIVATE_KEY);
+  const signer = privateKeyToAccount(getSessionPrivateKey());
   return toMetaMaskSmartAccount({
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     client: publicClient as any,
@@ -55,7 +54,7 @@ export async function getSessionAddress(): Promise<`0x${string}`> {
  * scope correctly (A → B → C, each with separate caps and revocations).
  */
 export async function getAgentSmartAccountAddress(agentId: string): Promise<`0x${string}`> {
-  const signer = privateKeyToAccount(SESSION_PRIVATE_KEY);
+  const signer = privateKeyToAccount(getSessionPrivateKey());
   const salt   = keccak256(encodePacked(["address", "string"], [signer.address, agentId]));
   const account = await toMetaMaskSmartAccount({
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

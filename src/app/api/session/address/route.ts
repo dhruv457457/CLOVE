@@ -1,31 +1,29 @@
 import { NextResponse } from "next/server";
-import { getAgentWalletAddress } from "@/lib/oneshot/agentWallet";
-import { getSessionAddress } from "@/lib/web3/serverSession";
 
 /**
- * Returns the CLOVE agent session account address.
- * Uses the 1Shot server wallet if configured, falls back to the
- * local private-key-derived smart account for development.
+ * Returns the address users must grant ERC-7715 permissions TO.
+ *
+ * PRIMARY path: 1Shot Public Relayer targetAddress.
+ * Users grant to this address so the relayer can execute DeFi actions
+ * on their behalf. Gas is paid in USDC — no ETH, no billing needed.
+ *
+ * The targetAddress is stable on Base mainnet (from relayer_getCapabilities).
+ * We return NEXT_PUBLIC_CLOVE_SESSION_ADDRESS which is set to this value in .env.
  */
 export async function GET() {
-  // Prefer 1Shot server wallet (production)
-  if (process.env.ONESHOT_WALLET_ID && process.env.ONESHOT_API_KEY) {
-    try {
-      const address = await getAgentWalletAddress();
-      return NextResponse.json({ address, source: "1shot" });
-    } catch (e) {
-      console.warn("[session/address] 1Shot lookup failed, falling back:", e);
-    }
-  }
+  const address = process.env.NEXT_PUBLIC_CLOVE_SESSION_ADDRESS;
 
-  // Fallback: local private key → MetaMask smart account
-  try {
-    const address = await getSessionAddress();
-    return NextResponse.json({ address, source: "local" });
-  } catch (e) {
+  if (!address || !/^0x[0-9a-fA-F]{40}$/.test(address)) {
     return NextResponse.json(
-      { error: e instanceof Error ? e.message : "Failed to get session address" },
+      { error: "NEXT_PUBLIC_CLOVE_SESSION_ADDRESS not set or invalid" },
       { status: 500 }
     );
   }
+
+  return NextResponse.json({
+    address,
+    source:  "1shot-public-relayer",
+    note:    "Grant ERC-7715 permission to this address. Gas is paid in USDC via the 1Shot Public Relayer.",
+    relayer: "https://relayer.1shotapi.com/relayers",
+  });
 }

@@ -1,13 +1,8 @@
 import { NextResponse } from "next/server";
+import { getPayToAddress, getInternalSecretOptional } from "@/lib/config/env";
 
 const NETWORK_ID = "eip155:8453"; // Base mainnet
 const FACILITATOR_URL = "https://tx-sentinel-base-mainnet.api.cx.metamask.io/platform/v2/x402";
-
-const PAY_TO = (
-  process.env.CLOVE_PAY_TO_ADDRESS ??
-  process.env.NEXT_PUBLIC_CLOVE_SESSION_ADDRESS ??
-  "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
-);
 
 /** Build an HTTP 402 response with the PAYMENT-REQUIRED header — shared across all x402 services. */
 export async function build402(priceUsdc: number): Promise<NextResponse> {
@@ -28,7 +23,7 @@ export async function build402(priceUsdc: number): Promise<NextResponse> {
       scheme:  "exact",
       price:   `$${priceUsdc}`,
       network: NETWORK_ID,
-      payTo:   PAY_TO,
+      payTo:   getPayToAddress(),   // lazy — throws clearly if no real address configured
       extra:   { assetTransferMethod: "erc7710", facilitators },
     }],
   };
@@ -46,19 +41,45 @@ export async function build402(priceUsdc: number): Promise<NextResponse> {
 }
 
 /**
- * Verify a payment signature. Tries 1Shot's verify endpoint if credentials exist
- * and the payload has a real on-chain txHash; otherwise falls through to demo mode.
- * Mirrors the logic in /api/intelligence so all x402 services behave the same.
+ * Verify a payment signature. FAIL-CLOSED: rejects by default, only accepts:
+ *   (a) a real ERC-7710 delegation payment — payload.payload.permissionContext is a
+ *       genuine 0x hex blob (not "demo"); for the exact on-chain scheme with a txHash
+ *       we additionally confirm via 1Shot's verify endpoint when keys are present.
+ *   (b) an internal server-to-server call carrying the correct CLOVE_INTERNAL_SECRET.
+ *
+ * Anything else (malformed, empty, "demo", missing context) is rejected.
+ * This is the single verifier shared by every x402 service.
  */
 export async function verifyPayment(paymentSig: string): Promise<boolean> {
   let payload: Record<string, unknown> = {};
   try {
     payload = JSON.parse(Buffer.from(paymentSig, "base64").toString("utf-8"));
   } catch {
-    return true; // malformed — demo mode
+    return false; // malformed base64 / JSON → reject
   }
 
-  const hasTxHash = typeof payload.txHash === "string" && (payload.txHash as string).startsWith("0x");
+  // (b) Internal server-to-server allowlist (TTS, image, digest).
+  const internalSecret = getInternalSecretOptional();
+  const isInternalCall =
+    typeof payload.internalSecret === "string" &&
+    !!internalSecret &&
+    payload.internalSecret === internalSecret;
+  if (isInternalCall) return true;
+
+  // (a) Real ERC-7710 delegation context.
+  const inner   = payload.payload as Record<string, unknown> | undefined;
+  const permCtx = inner?.permissionContext as string | undefined;
+  const hasValidContext =
+    typeof permCtx === "string" &&
+    permCtx.startsWith("0x") &&
+    permCtx.length > 40 &&
+    !/^0x0*$/.test(permCtx) &&                 // reject all-zero / empty placeholder contexts
+    !permCtx.toLowerCase().includes("demo");
+
+  if (!hasValidContext) return false;
+
+  // For exact on-chain payments (have a txHash), confirm via 1Shot when configured.
+  const hasTxHash     = typeof payload.txHash === "string" && (payload.txHash as string).startsWith("0x");
   const isExactScheme = payload.scheme === "exact" && hasTxHash;
 
   if (isExactScheme) {
@@ -89,8 +110,18 @@ export async function verifyPayment(paymentSig: string): Promise<boolean> {
             return isValid === true;
           }
         }
-      } catch { /* fallthrough */ }
+        // 1Shot configured but verification could not be completed → reject.
+        return false;
+      } catch {
+        return false; // fail-closed on verifier error
+      }
     }
+    // Exact scheme but no 1Shot keys to verify the on-chain tx → reject.
+    return false;
   }
-  return true; // demo mode — trust any non-empty signature
+
+  // Delegation-scheme payment with a valid (non-demo) ERC-7710 context: accept.
+  // The client already validated the cryptographic delegation chain; there is no
+  // on-chain tx to confirm for this scheme.
+  return true;
 }

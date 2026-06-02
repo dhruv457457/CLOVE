@@ -61,7 +61,8 @@ interface Agent {
   delegationManagerAddress?: string | null;
   scheduleIntervalMs?:   number;
   lastRunAt?:            string | null;
-  thoughts?:             Array<{ step: string; content: string; ts?: string }>;
+  x402SpentUsdc?:        number;
+  thoughts?:             Array<{ step: string; content: string; ts?: string; txHash?: string; cost?: number }>;
 }
 
 /** Human-readable schedule label from ms */
@@ -316,9 +317,9 @@ function AgentNode({
             <button
               onClick={(e) => { e.stopPropagation(); data.onDelegate(); }}
               style={{ background: "transparent", border: "none", cursor: "pointer", color: TEXT2, fontSize: 9.5, padding: 0, letterSpacing: "0.04em" }}
-              title="Agent is in demo mode — click to grant ERC-7715 permission"
+              title="No real permission — click to grant ERC-7715 permission"
             >
-              ● demo · grant to go live →
+              ● needs permission · grant to run →
             </button>
           )}
           {data.delegationStatus === "pending" && (
@@ -531,7 +532,10 @@ export default function DashboardPage() {
   const [answers,          setAnswers]          = useState<Record<string, unknown>>({});
   const [qSubmitting,      setQSubmitting]      = useState(false);
 
-  const [permGrantOpen,    setPermGrantOpen]    = useState(false);
+  const [permGrantOpen,          setPermGrantOpen]          = useState(false);
+  // UX-5: after agent creation, if no real permission exists → auto-open Step 3
+  const [postCreatePermOpen,     setPostCreatePermOpen]     = useState(false);
+  const [postCreateAgentCount,   setPostCreateAgentCount]   = useState(0);
 
   // Schedule modal — opened from agent card clock chip
   const [scheduleAgent,    setScheduleAgent]    = useState<Agent | null>(null);
@@ -586,14 +590,18 @@ const loadAgents = useCallback(async () => {
         const rawThoughts = (d.thoughts ?? []) as Array<{
           type: string; content: Record<string, unknown>; createdAt?: string;
         }>;
-        const thoughts = rawThoughts.slice(-5).reverse().map(t => ({
+        // UX-4 fix: extract txHash + cost from raw content so drawer can show
+        // Basescan links and per-run x402 cost without a separate API call.
+        const thoughts = rawThoughts.slice(-8).reverse().map(t => ({
           step:    t.type,
           content: typeof t.content?.text === "string"    ? t.content.text
                  : typeof t.content?.insight === "string" ? t.content.insight
                  : typeof t.content?.tool === "string"    ? `${t.content.tool}()`
                  : typeof t.content?.description === "string" ? t.content.description
-                 : JSON.stringify(t.content).slice(0, 120),
-          ts: t.createdAt,
+                 : JSON.stringify(t.content).slice(0, 180),
+          ts:      t.createdAt,
+          txHash:  typeof t.content?.txHash === "string" ? t.content.txHash : undefined,
+          cost:    typeof t.content?.cost   === "number" ? t.content.cost   : undefined,
         }));
         setSelectedAgentData({ ...(d.agent as Agent), thoughts });
       })
@@ -680,7 +688,8 @@ const loadAgents = useCallback(async () => {
       onOk: async () => {
         setConfirmState(null);
         try {
-          await fetch(`/api/agent/${id}`, { method: "DELETE" });
+          const wallet = metamaskStore.getState().userAddress ?? "";
+          await fetch(`/api/agent/${id}?wallet=${encodeURIComponent(wallet)}`, { method: "DELETE" });
           if (selectedAgentId === id) { setSelectedAgentId(null); setDrawerOpen(false); }
           await loadAgents();
           toast(`Deleted "${name}"`, "success");
@@ -690,6 +699,58 @@ const loadAgents = useCallback(async () => {
       },
     });
   }, [loadAgents, selectedAgentId, toast]);
+
+  /**
+   * After granting ERC-7715 permission, auto-bind it to every agent that has
+   * delegationStatus "pending" or "none" — so users never need to manually
+   * delegate to each agent one by one.
+   *
+   * This is the missing link between "Grant permission" and "agents go live":
+   * previously onGranted just called loadAgents() leaving all agents as "pending".
+   */
+  const bindPermissionToPendingAgents = useCallback(async () => {
+    const perm = metamaskStore.getState().permission;
+    if (!perm?.permissionsContext) return;
+
+    // Always use the latest agents list (caller may have just created new ones)
+    const wallet = metamaskStore.getState().userAddress;
+    let latestAgents = agents;
+    if (wallet) {
+      try {
+        const r = await fetch(`/api/agent?wallet=${encodeURIComponent(wallet)}`);
+        if (r.ok) {
+          const d = await r.json() as { agents: typeof agents };
+          latestAgents = d.agents;
+        }
+      } catch { /* use existing agents list */ }
+    }
+
+    const pendingAgents = latestAgents.filter(
+      a => a.delegationStatus === "pending" || a.delegationStatus === "none" || !a.delegationStatus
+    );
+    if (pendingAgents.length === 0) return;
+
+    let bound = 0;
+    for (const a of pendingAgents) {
+      try {
+        const res = await fetch(`/api/agent/${a.id}/delegate-from-user`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            permissionsContext:        perm.permissionsContext,
+            delegationManagerAddress:  perm.delegationManager ?? "0x",
+            delegationHash:            "0xpending",
+            capUsdc:                   a.budgetUsdc,
+          }),
+        });
+        if (res.ok) bound++;
+      } catch { /* non-fatal per agent */ }
+    }
+    if (bound > 0) {
+      await loadAgents();
+      toast(`${bound} agent${bound > 1 ? "s are" : " is"} now live with real permission ✓`, "success");
+    }
+  }, [agents, loadAgents, toast]);
 
   // Fix 4: run scan (async — checks Telegram status server-side)
   const runScan = useCallback(async () => {
@@ -765,10 +826,32 @@ const loadAgents = useCallback(async () => {
       setQuestionnaire(null);
       setAnswers({});
       await loadAgents();
-      if (data.wired && data.chain) {
-        toast(`Team wired: ${data.chain}`, "success");
+
+      const agentCount = (data.agents as unknown[]).length;
+
+      // UX-5: check if user has a real permission AFTER creation.
+      // If not → automatically open Step 3 "Grant permission" so users don't
+      // land on a canvas full of "● demo" with no explanation.
+      const freshPerm = metamaskStore.getState().permission;
+      const hasFreshRealPerm = !!(
+        freshPerm?.permissionsContext &&
+        freshPerm.permissionsContext.length > 40 &&
+        !freshPerm.permissionsContext.includes("demo") &&
+        freshPerm.permissionsContext.startsWith("0x")
+      );
+
+      if (!hasFreshRealPerm) {
+        setPostCreateAgentCount(agentCount);
+        setPostCreatePermOpen(true);   // triggers Step 3 modal
       } else {
-        toast("Agent created", "success");
+        // Permission exists — auto-bind to any newly created pending agents right now.
+        // This runs silently in the background so the user never has to open Scan.
+        await bindPermissionToPendingAgents();
+        if (data.wired && data.chain) {
+          toast(`Team live: ${data.chain} ✓`, "success");
+        } else {
+          toast("Agent created and activated ✓", "success");
+        }
       }
     } catch (e) {
       toast("Failed to create agent: " + (e instanceof Error ? e.message : String(e)), "error");
@@ -1033,11 +1116,35 @@ const loadAgents = useCallback(async () => {
         />
       )}
 
-      {/* Permission grant modal */}
+      {/* Permission grant modal (from top bar button OR Step 3 flow) */}
       {permGrantOpen && (
         <PermGrantModal
           onClose={() => setPermGrantOpen(false)}
-          onGranted={() => { setPermGrantOpen(false); loadAgents(); }}
+          onGranted={async () => {
+            setPermGrantOpen(false);
+            // Auto-bind to every pending agent so they go live immediately —
+            // no manual "delegate →" click required per agent
+            await bindPermissionToPendingAgents();
+            // bindPermissionToPendingAgents already calls loadAgents() + toast
+            // but call once more in case there were no pending agents
+            await loadAgents();
+          }}
+        />
+      )}
+
+      {/* UX-5: Step 3 / 3 — Grant Permission (auto-opens after agent creation when no real permission) */}
+      {postCreatePermOpen && (
+        <Step3PermissionModal
+          agentCount={postCreateAgentCount}
+          onClose={() => {
+            setPostCreatePermOpen(false);
+            toast("Grant an ERC-7715 permission before creating agents to enable real on-chain execution.", "info");
+          }}
+          onGranted={() => {
+            // Close Step 3 and open the real PermGrantModal immediately
+            setPostCreatePermOpen(false);
+            setPermGrantOpen(true);
+          }}
         />
       )}
 
@@ -1587,7 +1694,7 @@ function HistoryDrawer({
         </div>
       </div>
 
-      {/* Agent meta */}
+      {/* Agent meta — UX-4: added lastRunAt, x402SpentUsdc, txHash */}
       <div style={{ padding: "12px 16px", borderBottom: `1px solid ${LINE}` }}>
         <div style={{ fontSize: 11.5, color: TEXT2, lineHeight: 1.5 }}>
           <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
@@ -1597,36 +1704,87 @@ function HistoryDrawer({
             </span>
           </div>
           <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
-            <span style={{ color: MID }}>Budget</span>
-            <span>{agent.budgetUsdc} USDC</span>
+            <span style={{ color: MID }}>Budget used</span>
+            <span>
+              {parseFloat(String(agent.budgetUsedUsdc ?? 0)).toFixed(3)}
+              <span style={{ color: MID }}> / {agent.budgetUsdc} USDC</span>
+            </span>
+          </div>
+          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+            <span style={{ color: MID }}>x402 spent</span>
+            <span style={{ color: (agent.x402SpentUsdc ?? 0) > 0 ? ACCENT : MID }}>
+              ${(agent.x402SpentUsdc ?? 0).toFixed(3)}
+            </span>
           </div>
           <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
             <span style={{ color: MID }}>Runs</span>
             <span>{agent.totalRuns}</span>
           </div>
-          <div style={{ display: "flex", justifyContent: "space-between" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
             <span style={{ color: MID }}>Last action</span>
             <span style={{ color: lastActionColor(agent.lastAction) }}>{agent.lastAction ?? "—"}</span>
           </div>
+          {agent.lastRunAt && (
+            <div style={{ display: "flex", justifyContent: "space-between" }}>
+              <span style={{ color: MID }}>Last run</span>
+              <span style={{ fontSize: 10.5 }}>
+                {new Date(agent.lastRunAt).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
+              </span>
+            </div>
+          )}
         </div>
       </div>
 
-      {/* Thoughts */}
+      {/* Thoughts — UX-4: Basescan links + cost chips */}
       <div style={{ padding: "12px 16px", flex: 1, overflowY: "auto" }}>
         <div style={{ fontSize: 10, color: MID, letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 10, display: "flex", alignItems: "center", gap: 6 }}>
           <Clock size={10} /> Recent thoughts
         </div>
         {thoughts.length === 0 ? (
-          <div style={{ fontSize: 12, color: MID, fontStyle: "italic" }}>No thought history yet.</div>
+          <div style={{ fontSize: 12, color: MID, fontStyle: "italic" }}>No thought history yet. Run the agent to see its reasoning.</div>
         ) : (
-          thoughts.slice(0, 5).map((t, i) => (
-            <div key={i} style={{ marginBottom: 12, paddingBottom: 12, borderBottom: i < Math.min(thoughts.length, 5) - 1 ? `1px solid ${LINE}` : "none" }}>
+          thoughts.map((t, i) => (
+            <div key={i} style={{ marginBottom: 12, paddingBottom: 12, borderBottom: i < thoughts.length - 1 ? `1px solid ${LINE}` : "none" }}>
+              {/* thought type badge */}
               <div style={{ fontSize: 9.5, color: ACCENT, letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 4 }}>{t.step}</div>
+
+              {/* thought content */}
               <div style={{ fontSize: 11, color: TEXT2, lineHeight: 1.5, fontFamily: t.step === "reflect" ? "var(--serif)" : "var(--sans)", fontStyle: t.step === "reflect" ? "italic" : "normal" }}>
                 {t.content.slice(0, 400)}{t.content.length > 400 ? "…" : ""}
               </div>
+
+              {/* UX-4: txHash → Basescan link */}
+              {t.txHash && (
+                <a
+                  href={`https://basescan.org/tx/${t.txHash}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  style={{
+                    display: "inline-flex", alignItems: "center", gap: 4, marginTop: 5,
+                    fontSize: 9.5, color: ACCENT, textDecoration: "none",
+                    background: "rgba(200,255,61,0.08)", border: "1px solid rgba(200,255,61,0.2)",
+                    padding: "2px 7px", borderRadius: 4,
+                  }}
+                >
+                  ↗ {t.txHash.slice(0, 10)}…{t.txHash.slice(-6)} · Basescan
+                </a>
+              )}
+
+              {/* UX-4: x402 cost chip */}
+              {t.cost !== undefined && t.cost > 0 && (
+                <span style={{
+                  display: "inline-flex", alignItems: "center", gap: 4, marginTop: 5, marginLeft: t.txHash ? 4 : 0,
+                  fontSize: 9.5, color: MID,
+                  background: "rgba(244,241,234,0.04)", border: `1px solid ${LINE}`,
+                  padding: "2px 6px", borderRadius: 4,
+                }}>
+                  x402 ${t.cost.toFixed(4)}
+                </span>
+              )}
+
+              {/* timestamp */}
               {t.ts && (
-                <div style={{ fontSize: 9.5, color: MID, marginTop: 4 }}>
+                <div style={{ fontSize: 9, color: MID, marginTop: 4, opacity: 0.7 }}>
                   {new Date(t.ts).toLocaleTimeString()}
                 </div>
               )}
@@ -1942,7 +2100,7 @@ function QuestionnaireModal({
                   </svg>
                 </span>
                 <span style={{ fontSize: 10.5, color: MID, letterSpacing: "0.12em", textTransform: "uppercase" }}>
-                  Quick questions about your agent
+                  Step 2 / 3 · Clarify your strategy
                 </span>
               </div>
               <div style={{ fontSize: 11.5, color: TEXT2, lineHeight: 1.5, maxWidth: "48ch" }}>
@@ -2086,6 +2244,114 @@ function QuestionnaireModal({
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+//  UX-5: Step 3 / 3 — Grant Permission (auto-opens after agent creation)
+// ─────────────────────────────────────────────────────────────────────────────
+
+function Step3PermissionModal({
+  agentCount, onClose, onGranted,
+}: {
+  agentCount: number;
+  onClose:    () => void;
+  onGranted:  () => void;
+}) {
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: "fixed", inset: 0, zIndex: 300,
+        background: "rgba(11,12,9,0.88)", backdropFilter: "blur(16px)",
+        display: "flex", alignItems: "center", justifyContent: "center", padding: 24,
+      }}
+    >
+      <div
+        onClick={e => e.stopPropagation()}
+        style={{
+          background: INK_1, border: `1px solid ${LINE_MID}`, borderRadius: 18,
+          width: 560, maxWidth: "100%",
+          color: TEXT, fontFamily: "var(--sans)",
+          boxShadow: "0 20px 80px -20px rgba(0,0,0,0.8)",
+          overflow: "hidden",
+        }}
+      >
+        {/* Step indicator bar */}
+        <div style={{ display: "flex", height: 3 }}>
+          <div style={{ flex: 1, background: ACCENT, opacity: 0.4 }} />
+          <div style={{ flex: 1, background: ACCENT, opacity: 0.4 }} />
+          <div style={{ flex: 1, background: ACCENT }} />
+        </div>
+
+        <div style={{ padding: "28px 32px 32px" }}>
+          {/* Eyebrow */}
+          <div style={{ fontSize: 10.5, color: MID, letterSpacing: "0.14em", textTransform: "uppercase", marginBottom: 10 }}>
+            Step 3 / 3 · Grant permission
+          </div>
+
+          {/* Headline */}
+          <div style={{ fontSize: 26, fontWeight: 500, fontFamily: "var(--serif)", fontStyle: "italic", letterSpacing: "-0.02em", lineHeight: 1.15, marginBottom: 10 }}>
+            One permission to make it real.
+          </div>
+
+          {/* Explanation */}
+          <p style={{ fontSize: 13.5, color: TEXT2, lineHeight: 1.6, marginBottom: 22, maxWidth: "46ch" }}>
+            Your {agentCount === 1 ? "agent was" : `${agentCount} agents were`} created but
+            {" "}<strong style={{ color: TEXT }}>can't execute real transactions yet</strong> — grant an ERC-7715 permission first.
+            Grant an ERC-7715 USDC budget below and they'll go live immediately.
+          </p>
+
+          {/* What this does */}
+          <div style={{
+            background: "rgba(200,255,61,0.04)", border: "1px solid rgba(200,255,61,0.14)",
+            borderRadius: 10, padding: "14px 16px", marginBottom: 22,
+            fontSize: 12, color: TEXT2, lineHeight: 1.65,
+          }}>
+            <div style={{ color: ACCENT, fontWeight: 600, fontSize: 11, letterSpacing: "0.06em", textTransform: "uppercase", marginBottom: 8 }}>
+              What granting does
+            </div>
+            {[
+              "Signs a non-custodial ERC-7715 permission in MetaMask — no key transfer",
+              "Sets a USDC budget cap your agent cannot exceed",
+              "Revocable at any time in one click from the dashboard",
+              "Your wallet stays in full control",
+            ].map((line, i) => (
+              <div key={i} style={{ display: "flex", gap: 8, marginBottom: i < 3 ? 5 : 0 }}>
+                <span style={{ color: ACCENT, flexShrink: 0, marginTop: 1 }}>✓</span>
+                <span>{line}</span>
+              </div>
+            ))}
+          </div>
+
+          {/* Actions */}
+          <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", alignItems: "center" }}>
+            <button
+              onClick={onClose}
+              style={{
+                padding: "10px 16px", borderRadius: 8,
+                background: "transparent", border: `1px solid ${LINE_MID}`,
+                color: MID, fontSize: 12.5, cursor: "pointer",
+              }}
+            >
+              Skip for now
+            </button>
+            <button
+              onClick={onGranted}
+              style={{
+                padding: "11px 24px", borderRadius: 8,
+                background: ACCENT, color: INK, border: "none",
+                fontWeight: 700, fontSize: 13, cursor: "pointer",
+                display: "inline-flex", alignItems: "center", gap: 8,
+                boxShadow: `0 4px 18px -6px ${ACCENT_GLOW}`,
+              }}
+            >
+              🔑 Grant ERC-7715 permission →
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 //  Permission Grant Modal
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -2195,7 +2461,7 @@ function PermGrantModal({ onClose, onGranted }: { onClose: () => void; onGranted
 
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            <span style={{ fontSize: 10.5, color: MID, letterSpacing: "0.06em" }}>Budget (USDC)</span>
+            <span style={{ fontSize: 10.5, color: MID, letterSpacing: "0.06em" }}>Budget cap (USDC)</span>
             <input
               type="number" min="1" max="10000" value={budget}
               onChange={e => setBudget(e.target.value)}
@@ -2203,7 +2469,10 @@ function PermGrantModal({ onClose, onGranted }: { onClose: () => void; onGranted
             />
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            <span style={{ fontSize: 10.5, color: MID, letterSpacing: "0.06em" }}>Period (days)</span>
+            {/* Bug 3 fix: "Period (days)" was confusing — users thought it was the
+                expiry. It's the BUDGET RESET interval, not how long the permission lasts.
+                The permission itself always lasts 90 days (hardcoded in permissions.ts). */}
+            <span style={{ fontSize: 10.5, color: MID, letterSpacing: "0.06em" }}>Budget resets every</span>
             <input
               type="number" min="1" max="365" value={days}
               onChange={e => setDays(Number(e.target.value))}
@@ -2213,8 +2482,10 @@ function PermGrantModal({ onClose, onGranted }: { onClose: () => void; onGranted
         </div>
 
         <div style={{ padding: "12px 14px", borderRadius: 9, background: "rgba(200,255,61,0.06)", border: "1px solid rgba(200,255,61,0.15)", fontSize: 11.5, color: TEXT2, lineHeight: 1.5 }}>
-          Maximum spend: <strong style={{ color: ACCENT }}>{budget} USDC</strong> per {days} days.
-          Gas is sponsored by 1Shot — you pay zero ETH.
+          {/* Bug 3 fix: explicitly distinguish budget period from permission expiry */}
+          Agent can spend up to <strong style={{ color: ACCENT }}>{budget} USDC every {days} days</strong>.
+          {" "}Permission valid for <strong style={{ color: TEXT }}>90 days</strong> (shown in top bar as days remaining).
+          {" "}Gas is sponsored by 1Shot — you pay zero ETH.
         </div>
 
         <button
@@ -2615,7 +2886,7 @@ function DelegateModal({
 
   const delegationBadge = parentIsReal || (localPerm && localPerm.permissionsContext)
     ? { label: "● real on-chain", color: ACCENT }
-    : { label: "● demo (no real context)", color: MID };
+    : { label: "● needs permission — grant first", color: MID };
 
   if (candidates.length === 0) {
     return (

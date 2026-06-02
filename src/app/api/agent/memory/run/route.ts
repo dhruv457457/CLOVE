@@ -10,9 +10,10 @@ export async function POST(request: NextRequest) {
   if (!body.walletAddress) return NextResponse.json({ error: "walletAddress required" }, { status: 400 });
 
   try {
-    // Save the run
+    // Save the run — DB-3 fix: pass agentId so per-agent memory queries work
     await saveRun({
       walletAddress: body.walletAddress,
+      agentId:       body.agentId,          // DB-3: forward agentId if provided
       runId:         body.runId         ?? `run_${Date.now()}`,
       success:       body.success        ?? false,
       protocol:      body.protocol       ?? "unknown",
@@ -35,7 +36,7 @@ export async function POST(request: NextRequest) {
     if (body.yields && Object.keys(body.yields).length > 0) {
       await saveApySnapshot({
         morpho:    body.yields.morpho    ?? 0,
-        sky:       body.yields.sky       ?? 0,
+        aave:      body.yields.aave      ?? (body.yields as Record<string,number>).sky ?? 0,
         aerodrome: body.yields.aerodrome ?? 0,
         lido:      body.yields.lido      ?? 0,
         uniswap:   body.yields.uniswap   ?? 0,

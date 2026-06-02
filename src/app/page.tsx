@@ -544,18 +544,30 @@ export default function LandingPage() {
             </p>
           </div>
           <div className="flex flex-wrap gap-[60px]">
-            {[
-              { h: "Product",   items: ["Dashboard", "Marketplace", "Pricing"] },
-              { h: "Resources", items: ["Documentation", "Manifesto", "Status"] },
-              { h: "Company",   items: ["Twitter", "Discord", "Contact"] },
-            ].map((col) => (
+            {([
+              { h: "Product",   items: [
+                { label: "Dashboard",   href: "/dashboard" },
+                { label: "Marketplace", href: "/dashboard" },
+                { label: "Pricing",     href: "/#pricing" },
+              ]},
+              { h: "Resources", items: [
+                { label: "Documentation", href: "https://github.com/clove-defi/clove#readme" },
+                { label: "Manifesto",     href: "https://github.com/clove-defi/clove#manifesto" },
+                { label: "Status",        href: "https://ethglobal.com" },
+              ]},
+              { h: "Company", items: [
+                { label: "Twitter",  href: "https://twitter.com/clove_defi" },
+                { label: "Discord",  href: "https://discord.gg/clove" },
+                { label: "Contact",  href: "mailto:hi@clove.finance" },
+              ]},
+            ] as Array<{ h: string; items: { label: string; href: string }[] }>).map((col) => (
               <div key={col.h}>
                 <h6 className="m-0 mb-3.5 text-[11px] font-medium uppercase tracking-[0.14em]" style={{ color: "#6B6A60" }}>
                   {col.h}
                 </h6>
                 {col.items.map((a) => (
-                  <a key={a} className="block py-1 text-[14px] opacity-80 hover:opacity-100" href="#">
-                    {a}
+                  <a key={a.label} className="block py-1 text-[14px] opacity-80 hover:opacity-100" href={a.href}>
+                    {a.label}
                   </a>
                 ))}
               </div>

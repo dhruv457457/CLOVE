@@ -1,10 +1,10 @@
-/** Contract addresses for all CLOVE-supported protocols on Base (8453) and Base Sepolia (84532). */
+/** Contract addresses for all CLOVE-supported protocols on Base mainnet (8453).
+ *  MAINNET (Ethereum L1) entries are reference-only for protocols whose canonical
+ *  deployment lives on L1 (Sky/Maker converters, stETH). CLOVE executes on Base. */
 
 export const CHAIN = {
   BASE: 8453,
-  BASE_SEPOLIA: 84532,
   MAINNET: 1,
-  SEPOLIA: 11155111,
 } as const;
 
 // ── Tokens ───────────────────────────────────────────────────────────────────
@@ -12,24 +12,23 @@ export const CHAIN = {
 export const TOKENS = {
   USDC: {
     [CHAIN.BASE]: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-    [CHAIN.BASE_SEPOLIA]: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
   },
   WETH: {
     [CHAIN.BASE]: "0x4200000000000000000000000000000000000006",
-    [CHAIN.BASE_SEPOLIA]: "0x4200000000000000000000000000000000000006",
   },
+  // USDS: MakerDAO-derived ERC-20 stablecoin (rely/deny/mint pattern)
   USDS: {
-    [CHAIN.BASE]: "0x820C137fa70C8691f0e44Dc420a5e53c168921Dc",
+    [CHAIN.BASE]: "0x5875eEE11Cf8398102FdAd704C9E96607675467a",
     [CHAIN.MAINNET]: "0xdC035D45d973E3EC169d2276DDab16f1e407384F",
   },
+  // sUSDS: ERC-4626 savings vault (deposit/withdraw/mint/redeem)
   sUSDS: {
-    [CHAIN.BASE]: "0x5875eEE11Cf8398102FdAd704C9E96607675467a",
+    [CHAIN.BASE]: "0x820C137fa70C8691f0e44Dc420a5e53c168921Dc",
     [CHAIN.MAINNET]: "0xa3931d71877C0E7a3148CB7Eb4463524FEc27fbD",
   },
   wstETH: {
     [CHAIN.BASE]: "0xc1CBa3fCea344f92D9239c08C0568f6F2F0ee452",
     [CHAIN.MAINNET]: "0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0",
-    [CHAIN.SEPOLIA]: "0xB82381A3fBD3FaFA77B3a7bE693342618240067b",
   },
   stETH: {
     [CHAIN.MAINNET]: "0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84",
@@ -45,22 +44,18 @@ export const UNISWAP_V3 = {
   factory: {
     [CHAIN.BASE]: "0x33128a8fC17869897dcE68Ed026d694621f6FDfD",
     [CHAIN.MAINNET]: "0x1F98431c8aD98523631AE4a59f267346ea31F984",
-    [CHAIN.SEPOLIA]: "0x0227628f3F023bb0B980b67D528571c95c6DaC1c",
   },
   positionManager: {
     [CHAIN.BASE]: "0x03a520b32C04BF3bEEf7BEb72E919cf822Ed34f1",
     [CHAIN.MAINNET]: "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
-    [CHAIN.SEPOLIA]: "0x1238536071E1c677A632429e3655c799b22cDA52",
   },
   swapRouter: {
     [CHAIN.BASE]: "0x2626664c2603336E57B271c5C0b26F421741e481",
     [CHAIN.MAINNET]: "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45",
-    [CHAIN.SEPOLIA]: "0x3bFA4769FB09eefC5a80d6E87c3B9C650f7Ae48E",
   },
   quoter: {
     [CHAIN.BASE]: "0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a",
     [CHAIN.MAINNET]: "0x61fFE014bA17989E743c5F6cB21bF9697530B21e",
-    [CHAIN.SEPOLIA]: "0xEd1f6473345F45b75F8179591dd5bA1888cf2FB3",
   },
 } as const;
 
@@ -70,7 +65,6 @@ export const MORPHO = {
   blue: {
     [CHAIN.BASE]: "0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb",
     [CHAIN.MAINNET]: "0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb",
-    [CHAIN.SEPOLIA]: "0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb",
   },
   // Well-known MetaMorpho vaults on Base
   vaults: {
@@ -105,8 +99,26 @@ export const LIDO = {
   stETH: TOKENS.stETH,
 } as const;
 
-// ── Sky (MakerDAO) ────────────────────────────────────────────────────────────
+// ── Aave v3 (Base mainnet) ────────────────────────────────────────────────────
+// Replaces Sky/sUSDS — Sky's savings mechanism on Base requires USDC→USDS
+// conversion first (no direct USDC deposit vault on Base).
+// Aave v3 Pool.supply(asset, amount, onBehalfOf, referralCode) accepts USDC
+// directly and is the cleaner single-method deposit on Base.
 
+export const AAVE_V3 = {
+  pool: {
+    /** Aave v3 Pool (proxy) on Base — supply/withdraw/borrow */
+    [CHAIN.BASE]: "0xA238Dd80C259a72e81d7e4664a9801593F98d1c5",
+  },
+  /** aUSDC token on Base (receipt token from Aave USDC supply) */
+  aUSDC: {
+    [CHAIN.BASE]: "0x4e65fE4DbA92790696d040ac24Aa414708F5c0AB",
+  },
+} as const;
+
+// ── Sky (MakerDAO) — reference only, not used for Base execution ──────────────
+// Sky's sUSDS on Base is an ERC-20 bridge token, not an ERC-4626 vault.
+// Direct USDC deposits are not supported. Kept for L1 reference addresses only.
 export const SKY = {
   sUSDS: TOKENS.sUSDS,
   USDS: TOKENS.USDS,

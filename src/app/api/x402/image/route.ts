@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { build402, verifyPayment } from "@/lib/x402/helpers";
+import { X402_PRICES } from "@/lib/config/env";
 
-const PRICE_USDC = 0.01;
+const PRICE_USDC = X402_PRICES.image;
 
 /**
  * x402-gated performance-art image service — powered by Venice AI (flux-2-max).
@@ -33,7 +34,8 @@ export async function POST(request: NextRequest) {
       imageUrl: generateFallbackSvgDataUrl(ctx),
       fallback: true,
       reason:   "VENICE_API_KEY not set",
-      _clove:   { paid: true, costUsdc: 0, via: "fallback-svg" },
+      // Honest: a placeholder SVG was returned, nothing was generated or charged.
+      _clove:   { paid: false, costUsdc: 0, via: "fallback-svg" },
     });
   }
 
@@ -63,7 +65,7 @@ export async function POST(request: NextRequest) {
         imageUrl: generateFallbackSvgDataUrl(ctx),
         fallback: true,
         reason:   `Venice ${res.status}`,
-        _clove:   { paid: true, costUsdc: 0, via: "fallback-svg" },
+        _clove:   { paid: false, costUsdc: 0, via: "fallback-svg" },
       });
     }
 
@@ -87,7 +89,7 @@ export async function POST(request: NextRequest) {
       imageUrl: generateFallbackSvgDataUrl(ctx),
       fallback: true,
       reason:   e instanceof Error ? e.message : String(e),
-      _clove:   { paid: true, costUsdc: 0, via: "fallback-svg" },
+      _clove:   { paid: false, costUsdc: 0, via: "fallback-svg" },
     });
   }
 }

@@ -40,31 +40,47 @@ export async function getRelevantInsights(
   agentId: string,
   walletAddress: string,
   query: string,
-  topK = 5,
+  topK = 6,
 ): Promise<SemanticInsight[]> {
   const rootAgentId = await findRootAgentId(agentId);
 
-  // Pull a wider candidate pool (last 100) than we'll return
-  const candidates = await getInsightCandidates(agentId, walletAddress, rootAgentId, 100);
+  // Pull a wider candidate pool for multi-agent chains
+  const candidates = await getInsightCandidates(agentId, walletAddress, rootAgentId, 150);
   if (candidates.length === 0) return [];
+
+  // Always include the freshest team-data broadcast from the current cycle
+  // (tagged "team-data" by the A2A-1 broadcaster in run-stream).
+  // These are pinned to the top regardless of similarity score because
+  // they contain the upstream agent's actual yield/risk findings.
+  const now = Date.now();
+  const freshTeamData = candidates
+    .filter(c => {
+      if (!c.tags?.includes("team-data")) return false;
+      // Only "fresh" if it arrived in the last 10 minutes (one cron cycle)
+      const age = now - new Date(c.createdAt).getTime();
+      return age < 10 * 60 * 1000;
+    })
+    .slice(0, 2)  // pin at most 2 fresh team data messages
+    .map(c => ({ ...c, _similarity: 1.0 } as SemanticInsight));  // max relevance
+
+  const pinned = new Set(freshTeamData.map(c => c.agentId + c.runId + c.text.slice(0, 20)));
+  const rest = candidates.filter(c => !pinned.has(c.agentId + c.runId + c.text.slice(0, 20)));
 
   // Compute query embedding once
   const queryEmbedding = await embedText(query);
 
-  // Rank candidates that have embeddings; for the rest, give them low score
-  // (the legacy / pre-embedding insights still show up via recency tail)
-  const withEmbeddings = candidates.filter(c => c.embedding && c.embedding.length > 0);
-  const without       = candidates.filter(c => !c.embedding || c.embedding.length === 0);
+  const withEmbeddings = rest.filter(c => c.embedding && c.embedding.length > 0);
+  const without        = rest.filter(c => !c.embedding || c.embedding.length === 0);
 
-  const ranked = rankBySimilarity(withEmbeddings, queryEmbedding, topK);
+  const remainingSlots = Math.max(0, topK - freshTeamData.length);
+  const ranked = rankBySimilarity(withEmbeddings, queryEmbedding, remainingSlots);
 
-  // If we have room, top up with most-recent insights that have no embedding
-  const remaining = topK - ranked.length;
-  if (remaining > 0 && without.length > 0) {
-    const tail: SemanticInsight[] = without.slice(0, remaining).map(c => ({ ...c, _similarity: 0 }));
-    return [...ranked, ...tail];
-  }
-  return ranked;
+  // Top up with recency-ordered no-embedding insights if slots remain
+  const tail: SemanticInsight[] = without
+    .slice(0, Math.max(0, remainingSlots - ranked.length))
+    .map(c => ({ ...c, _similarity: 0 }));
+
+  return [...freshTeamData, ...ranked, ...tail];
 }
 
 /** Format insights for injection into an LLM prompt. */

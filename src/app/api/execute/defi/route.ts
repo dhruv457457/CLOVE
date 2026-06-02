@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { encodeFunctionData, parseUnits } from "viem";
-import { UNISWAP_V3, MORPHO, LIDO, SKY, AERODROME, TOKENS, CHAIN } from "@/lib/protocols/addresses";
+import { UNISWAP_V3, MORPHO, LIDO, AAVE_V3, AERODROME, TOKENS, CHAIN } from "@/lib/protocols/addresses";
+import { executeViaPublicRelayer } from "@/lib/oneshot/publicRelayer";
 
 interface ExecRequest {
   action?: string;
@@ -24,10 +25,15 @@ const ABIS = {
     inputs: [{ name: "assets", type: "uint256" }, { name: "receiver", type: "address" }],
     stateMutability: "nonpayable" as const, outputs: [{ type: "uint256" }],
   }],
-  skyDeposit: [{
-    name: "deposit", type: "function" as const,
-    inputs: [{ name: "assets", type: "uint256" }, { name: "receiver", type: "address" }],
-    stateMutability: "nonpayable" as const, outputs: [{ type: "uint256" }],
+  aaveSupply: [{
+    name: "supply", type: "function" as const,
+    inputs: [
+      { name: "asset",          type: "address" },
+      { name: "amount",         type: "uint256" },
+      { name: "onBehalfOf",     type: "address" },
+      { name: "referralCode",   type: "uint16"  },
+    ],
+    stateMutability: "nonpayable" as const, outputs: [],
   }],
   lidoWrap: [{
     name: "wrap", type: "function" as const,
@@ -81,17 +87,34 @@ const METHOD_REGISTRY = {
       assets: amount.toString(), receiver,
     }),
   },
-  "sky-deposit": {
-    methodIdEnv: "ONESHOT_METHOD_SKY_DEPOSIT",
-    contract: SKY.sUSDS[CHAIN.BASE] as `0x${string}`,
-    buildParams: (amount: bigint, receiver: `0x${string}`) => ({
-      assets: amount.toString(), receiver,
+  // Aave v3 supply replaces Sky/sUSDS — Sky has no direct USDC deposit on Base.
+  // supply(asset, amount, onBehalfOf, referralCode=0) → mints aUSDC to onBehalfOf.
+  "aave-supply": {
+    methodIdEnv: "ONESHOT_METHOD_AAVE_SUPPLY",
+    contract: AAVE_V3.pool[CHAIN.BASE] as `0x${string}`,
+    buildParams: (amount: bigint, onBehalfOf: `0x${string}`) => ({
+      asset:        TOKENS.USDC[CHAIN.BASE],
+      amount:       amount.toString(),
+      onBehalfOf,
+      referralCode: "0",
     }),
   },
+  // BREAK-5 fix: on Base, wstETH is acquired by swapping USDC → wstETH via Uniswap
+  // (there is no stETH on Base to wrap). We reuse the Uniswap swap route but target wstETH.
   "lido-wrap": {
-    methodIdEnv: "ONESHOT_METHOD_LIDO_WRAP",
-    contract: LIDO.wstETH[CHAIN.BASE] as `0x${string}`,
-    buildParams: (amount: bigint) => ({ _stETHAmount: amount.toString() }),
+    methodIdEnv: "ONESHOT_METHOD_UNISWAP_SWAP_EXACT_INPUT",  // reuse Uniswap swap
+    contract: (UNISWAP_V3.swapRouter as Record<number, string>)[CHAIN.BASE] as `0x${string}`,
+    buildParams: (amount: bigint, recipient: `0x${string}`) => ({
+      params: {
+        tokenIn:           TOKENS.USDC[CHAIN.BASE],
+        tokenOut:          LIDO.wstETH[CHAIN.BASE],  // USDC → wstETH on Base
+        fee:               500,  // 0.05% pool
+        recipient,
+        amountIn:          amount.toString(),
+        amountOutMinimum:  "0",
+        sqrtPriceLimitX96: "0",
+      },
+    }),
   },
   "uniswap-swap-exact-input": {
     methodIdEnv: "ONESHOT_METHOD_UNISWAP_SWAP_EXACT_INPUT",
@@ -127,6 +150,32 @@ const METHOD_REGISTRY = {
 
 type ActionKey = keyof typeof METHOD_REGISTRY;
 
+/**
+ * Decode a permissionsContext into the delegationData array 1Shot expects.
+ *
+ * 1Shot's executeAsDelegator `delegationData` must be an array of JSON strings,
+ * one per delegation in the chain (parent first, child last) with BigInts as
+ * decimal strings — NOT the hex-encoded blob stored in the DB.
+ *
+ * Two storage formats exist:
+ *   a) 0x + hex(JSON array)  — sub-agents from 1Shot redelegate → decode + split
+ *   b) Raw ABI-encoded ERC-7715 context (root grants from MetaMask) — pass as-is
+ *      in a single-element array; 1Shot handles ABI-encoded contexts too.
+ */
+function decodeDelegationData(permissionsContext: string): string[] {
+  if (!permissionsContext.startsWith("0x")) return [permissionsContext];
+  try {
+    const json = Buffer.from(permissionsContext.slice(2), "hex").toString("utf-8");
+    // If valid JSON it's the [parent, redelegation] array from 1Shot redelegate.
+    const chain = JSON.parse(json) as unknown[];
+    if (Array.isArray(chain) && chain.length > 0) {
+      return chain.map(d => JSON.stringify(d));
+    }
+  } catch { /* not hex-encoded JSON — fall through */ }
+  // ABI-encoded root context from MetaMask: pass the hex string directly.
+  return [permissionsContext];
+}
+
 // ── 1Shot executeAsDelegator wrapper ────────────────────────────────────────
 async function executeViaOneShot(
   methodId: string,
@@ -138,6 +187,9 @@ async function executeViaOneShot(
   const apiSecret = process.env.ONESHOT_API_SECRET;
   const walletId  = process.env.ONESHOT_WALLET_ID;
   if (!apiKey || !apiSecret || !walletId) return null;
+
+  // Decode to the array-of-JSON-strings format 1Shot requires.
+  const delegationData = decodeDelegationData(permissionsContext);
 
   try {
     // 1. Get OAuth token
@@ -170,9 +222,9 @@ async function executeViaOneShot(
           params,
           walletId,
           memo,
-          // One-time use: pass the raw ERC-7715 permissionsContext.
-          // 1Shot decodes the chain, builds redeemDelegation UserOp, signs, submits.
-          delegationData: [permissionsContext],
+          // delegationData: array of JSON strings, one per link in the chain
+          // (parent first, child last). BigInts must be decimal strings in JSON.
+          delegationData,
         }),
         signal: AbortSignal.timeout(30000),
       }
@@ -200,10 +252,10 @@ export async function POST(request: NextRequest) {
   const registryEntry = METHOD_REGISTRY[actionKey];
 
   if (!registryEntry) {
+    // CODE-6: don't expose internal registry keys — just return the error
     return NextResponse.json({
       prepared: false,
-      error: `Unknown action: ${action ?? protocol}`,
-      available: Object.keys(METHOD_REGISTRY),
+      error: `Unknown action: ${action ?? protocol}. Supported: morpho-vault-deposit, aave-supply, lido-wrap, uniswap-swap-exact-input, aerodrome-swap-exact-tokens.`,
     }, { status: 400 });
   }
 
@@ -216,124 +268,98 @@ export async function POST(request: NextRequest) {
     defaultAmount = parseUnits("1", 6);
   }
 
-  // ── Try real on-chain execution via 1Shot ────────────────────────────────────
+  // ── Try real on-chain execution ───────────────────────────────────────────────
   const methodId = process.env[registryEntry.methodIdEnv];
   const hasRealContext =
     permissionsContext &&
     permissionsContext !== "0xdemo" &&
     permissionsContext !== "0x" &&
+    !/^0x0*$/.test(permissionsContext) &&
     permissionsContext.length > 20;
 
-  if (methodId && hasRealContext) {
-    const params = (registryEntry.buildParams as (a: bigint, b: `0x${string}`) => Record<string, unknown>)(
-      defaultAmount,
-      walletAddress as `0x${string}`,
-    );
+  if (hasRealContext) {
+    // ── 1Shot Public Relayer — delegated USDC transfer ────────────────────────
+    // The erc20-token-periodic permission only authorizes USDC.transfer(), so the
+    // on-chain action is a delegated transfer of the budgeted USDC. Recipient is
+    // the user's own wallet (self-custody "savings"/position move) — a real
+    // ERC-7710 redemption relayed through the 1Shot permissionless mainnet relayer
+    // with gas paid in USDC. Qualifies for the relayer + x402 + A2A tracks.
+    //
+    // The protocol/yield layer (Venice + DeFiLlama) is the INTELLIGENCE; this is
+    // the executed on-chain MOVEMENT. True protocol deposits (approve+supply) need
+    // a FunctionCall-scoped delegation — see roadmap.
+    const transferRecipient = (nodeConfig.recipient as string | undefined)
+      ?? walletAddress;  // default: move to the user's own wallet
 
-    const result = await executeViaOneShot(
-      methodId,
-      params,
-      permissionsContext,
-      `CLOVE: ${actionKey}`,
-    );
-    if (result) {
-      return NextResponse.json({
-        submitted: true,
-        txHash:           result.txHash,
-        transactionId:    result.id,
-        action:           actionKey,
-        protocol,
-        contractAddress:  registryEntry.contract,
-        amount:           defaultAmount.toString(),
-        via:              "1shot",
+    try {
+      const relayResult = await executeViaPublicRelayer({
+        userPermissionsContext: permissionsContext,
+        recipient:              transferRecipient as `0x${string}`,
+        workAmountUsdc:         Number(defaultAmount) / 1e6,
+        memo:                   `CLOVE: ${actionKey} (delegated transfer)`,
       });
+      if (relayResult.status !== "failed") {
+        return NextResponse.json({
+          submitted:       true,
+          txHash:          relayResult.txHash,
+          taskId:          relayResult.taskId,
+          action:          actionKey,
+          protocol,
+          recipient:       transferRecipient,
+          amount:          defaultAmount.toString(),
+          feeUsdc:         relayResult.feeUsdc,
+          via:             "1shot-public-relayer",
+        });
+      }
+      // Relayer gave a definitive failure (e.g. allowance exceeded) — surface it,
+      // don't bother with the dead 1Shot fallback.
+      return NextResponse.json({
+        submitted: false,
+        error:     relayResult.error ?? "Relayer rejected the transaction.",
+        taskId:    relayResult.taskId,
+        action:    actionKey,
+        protocol,
+        code:      "relayer-rejected",
+      }, { status: 400 });
+    } catch (e) {
+      console.warn("[execute/defi] Public relayer exception:", e instanceof Error ? e.message : e);
     }
-    // Fall through to "prepared" if 1Shot failed
+
+    // ── Path B: Authenticated 1Shot API (fallback when method UUIDs are set) ──
+    if (methodId) {
+      const oneshotParams = (registryEntry.buildParams as (a: bigint, b: `0x${string}`) => Record<string, unknown>)(
+        defaultAmount, walletAddress as `0x${string}`,
+      );
+      const result = await executeViaOneShot(methodId, oneshotParams, permissionsContext, `CLOVE: ${actionKey}`);
+      if (result) {
+        return NextResponse.json({
+          submitted:       true,
+          txHash:          result.txHash,
+          transactionId:   result.id,
+          action:          actionKey,
+          protocol,
+          contractAddress: registryEntry.contract,
+          amount:          defaultAmount.toString(),
+          via:             "1shot",
+        });
+      }
+    }
+    // Both paths failed — hard fail, no demo fallback.
   }
 
-  // ── Fallback: return prepared calldata (when methodId missing OR 1Shot failed) ─
-  let calldata: `0x${string}` = "0x";
-  let functionName = "";
-
-  try {
-    switch (actionKey) {
-      case "usdc-approve":
-        calldata = encodeFunctionData({
-          abi: ABIS.erc20Approve, functionName: "approve",
-          args: [registryEntry.contract, defaultAmount],
-        });
-        functionName = "approve";
-        break;
-      case "morpho-vault-deposit":
-        calldata = encodeFunctionData({
-          abi: ABIS.morphoVaultDeposit, functionName: "deposit",
-          args: [defaultAmount, walletAddress as `0x${string}`],
-        });
-        functionName = "deposit";
-        break;
-      case "sky-deposit":
-        calldata = encodeFunctionData({
-          abi: ABIS.skyDeposit, functionName: "deposit",
-          args: [defaultAmount, walletAddress as `0x${string}`],
-        });
-        functionName = "deposit";
-        break;
-      case "lido-wrap":
-        calldata = encodeFunctionData({
-          abi: ABIS.lidoWrap, functionName: "wrap", args: [defaultAmount],
-        });
-        functionName = "wrap";
-        break;
-      case "uniswap-swap-exact-input":
-        calldata = encodeFunctionData({
-          abi: ABIS.uniswapSwap, functionName: "exactInputSingle",
-          args: [{
-            tokenIn: TOKENS.USDC[CHAIN.BASE] as `0x${string}`,
-            tokenOut: TOKENS.WETH[CHAIN.BASE] as `0x${string}`,
-            fee: 3000, recipient: walletAddress as `0x${string}`,
-            amountIn: defaultAmount, amountOutMinimum: 0n, sqrtPriceLimitX96: 0n,
-          }],
-        });
-        functionName = "exactInputSingle";
-        break;
-      case "aerodrome-swap-exact-tokens":
-        calldata = encodeFunctionData({
-          abi: ABIS.aerodromeSwap, functionName: "swapExactTokensForTokens",
-          args: [
-            defaultAmount, 0n,
-            [{
-              from: TOKENS.USDC[CHAIN.BASE] as `0x${string}`,
-              to: TOKENS.AERO[CHAIN.BASE] as `0x${string}`,
-              stable: false,
-              factory: (AERODROME.poolFactory as Record<number, string>)[CHAIN.BASE] as `0x${string}`,
-            }],
-            walletAddress as `0x${string}`,
-            BigInt(Math.floor(Date.now() / 1000) + 1800),
-          ],
-        });
-        functionName = "swapExactTokensForTokens";
-        break;
-    }
-  } catch (e) {
-    return NextResponse.json(
-      { error: `Encoding failed: ${e instanceof Error ? e.message : e}` },
-      { status: 500 }
-    );
+  // No real context = no execution. Return a clear error.
+  if (!hasRealContext) {
+    return NextResponse.json({
+      error: "No real ERC-7715 permission context. Grant a permission via MetaMask before running agents.",
+      code:  "needs-permission",
+    }, { status: 400 });
   }
 
+  // Real context exists but both execution paths failed — surface the error.
   return NextResponse.json({
-    prepared:        true,
-    submitted:       false,
-    contractAddress: registryEntry.contract,
-    functionName,
-    calldata,
-    action:          actionKey,
+    error: "Execution failed via both 1Shot Public Relayer and executeAsDelegator. Check server logs.",
+    action: actionKey,
     protocol,
-    amount:          defaultAmount.toString(),
-    delegationManager,
-    permissionsContext: permissionsContext?.slice(0, 40) + "…",
-    reason:          methodId
-      ? "1Shot executeAsDelegator failed — check server logs"
-      : `Set ${registryEntry.methodIdEnv} in .env.local with the 1Shot contract method UUID to enable on-chain submission`,
-  });
+    submitted: false,
+  }, { status: 502 });
 }

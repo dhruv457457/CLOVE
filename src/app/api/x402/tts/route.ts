@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { build402, verifyPayment } from "@/lib/x402/helpers";
+import { X402_PRICES } from "@/lib/config/env";
+import { VENICE_TTS_VOICES } from "@/lib/venice/client";
 
-const PRICE_USDC = 0.005;
+const PRICE_USDC = X402_PRICES.tts;
 
 /**
  * x402-gated text-to-speech service — powered by Venice AI (tts-kokoro).
@@ -30,7 +32,7 @@ export async function POST(request: NextRequest) {
   catch { return NextResponse.json({ error: "Invalid body" }, { status: 400 }); }
 
   const text  = (body.text ?? "").slice(0, 1000); // hard cap to control cost
-  const voice = body.voice ?? "af_heart";         // warm, natural default
+  const voice = body.voice ?? VENICE_TTS_VOICES.default;   // warm, natural default
 
   if (!text.trim()) {
     return NextResponse.json({ error: "Missing text" }, { status: 400 });
@@ -38,10 +40,11 @@ export async function POST(request: NextRequest) {
 
   const veniceKey = process.env.VENICE_API_KEY;
   if (!veniceKey) {
+    // Honest: nothing was generated and nothing was charged.
     return NextResponse.json({
       skipped: true,
       reason: "VENICE_API_KEY not set",
-      _clove: { paid: true, costUsdc: 0, via: "demo" },
+      _clove: { paid: false, costUsdc: 0, via: "skipped" },
     });
   }
 
@@ -67,7 +70,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({
         skipped: true,
         reason:  `Venice TTS ${res.status}`,
-        _clove:  { paid: true, costUsdc: 0, via: "fallback" },
+        _clove:  { paid: false, costUsdc: 0, via: "fallback" },
       });
     }
 
@@ -88,7 +91,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({
       skipped: true,
       reason:  e instanceof Error ? e.message : String(e),
-      _clove:  { paid: true, costUsdc: 0, via: "fallback" },
+      _clove:  { paid: false, costUsdc: 0, via: "fallback" },
     });
   }
 }

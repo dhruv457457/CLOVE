@@ -131,41 +131,44 @@ export async function POST(request: NextRequest) {
   }
 
   // ── Step 2: determine permissionContext for the payment ───────────────────
+  // FAIL-CLOSED: we only build a payment from a REAL ERC-7710 delegation context.
+  // There is no demo/stub path — without a real context the caller cannot pay, and
+  // the downstream verifier would reject a fabricated signature anyway.
   let permissionContext: string;
-  let via = "demo";
+  let via: string;
 
   const facilitators = (accepted.extra?.facilitators ?? []) as `0x${string}`[];
   const facilitatorAddress = facilitators[0];
 
   const isRealContext =
-    permissionsContext &&
+    !!permissionsContext &&
     permissionsContext !== "0xdemo" &&
     permissionsContext !== "0x" &&
-    permissionsContext.length > 20;
+    !/^0x0*$/.test(permissionsContext) &&
+    permissionsContext.length > 40;
 
-  if (isRealContext && facilitatorAddress) {
-    // Try 1Shot redelegation
+  if (!isRealContext) {
+    return NextResponse.json(
+      { error: "No real ERC-7710 permission context — cannot construct a payment. Grant a permission first." },
+      { status: 400 },
+    );
+  }
+
+  if (facilitatorAddress) {
+    // Try 1Shot redelegation to the facilitator; else pass the original context.
     const redelegated = await attempt1ShotRedelegate(permissionsContext, facilitatorAddress);
-    if (redelegated) {
-      permissionContext = redelegated;
-      via = "1shot";
-    } else {
-      // Fall back to passing the original context directly
-      permissionContext = permissionsContext;
-      via = "direct";
-    }
+    permissionContext = redelegated ?? permissionsContext;
+    via = redelegated ? "1shot" : "direct";
   } else {
-    // Demo mode: generate a signed stub that the intelligence endpoint will accept
-    // (verifyPayment() returns true as fallback when 1Shot validation fails)
-    permissionContext = permissionsContext ?? "0xdemo";
-    via = "demo";
+    permissionContext = permissionsContext;
+    via = "direct";
   }
 
   // ── Step 3: build x402 payment signature ─────────────────────────────────
   const paymentPayload = {
     x402Version: 2,
     scheme: accepted.scheme ?? "exact",
-    network: accepted.network ?? "eip155:84532",
+    network: accepted.network ?? "eip155:8453",
     accepted,
     payload: {
       delegationManager: delegationManager ?? "0x",
@@ -194,8 +197,10 @@ export async function POST(request: NextRequest) {
   }
 
   const data = await paidRes.json();
+  // Real charged amount comes from the 402 challenge price (e.g. "$0.01").
+  const costUsdc = Number.parseFloat((accepted.price ?? "0").replace(/[^0-9.]/g, "")) || 0;
   return NextResponse.json({
     ...data,
-    _clove: { paid: true, costUsdc: 0.01, via },
+    _clove: { paid: true, costUsdc, via },
   });
 }

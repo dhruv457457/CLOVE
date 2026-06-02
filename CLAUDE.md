@@ -21,7 +21,7 @@ No test runner is configured. Verification is done by hitting API routes directl
 
 ## What This Is
 
-**CLOVE** is an autonomous DeFi agent OS on Base/Base Sepolia. Users describe a strategy → AI compiles it into a visual workflow → agent executes it autonomously using a delegated USDC budget.
+**CLOVE** is an autonomous DeFi agent OS on Base mainnet. Users describe a strategy → AI compiles it into a visual workflow → agent executes it autonomously using a delegated USDC budget.
 
 **The agent loop:**
 1. User grants ERC-7715 permission (recurring USDC budget) to CLOVE's 1Shot wallet
@@ -35,8 +35,8 @@ No test runner is configured. Verification is done by hitting API routes directl
 
 ## Key Architecture Decisions
 
-### Chain: Base Sepolia only (testnet)
-`src/lib/web3/config.ts` — USDC at `0x036CbD53842c5426634e7929541eC2318f3dCF7e`, chain ID 84532.
+### Chain: Base mainnet only (chainId 8453)
+`src/lib/web3/config.ts` — `CHAIN = base`, USDC at `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`. No testnet mode.
 
 ### Venice AI is OpenAI-compatible
 `src/lib/venice/client.ts` uses `new OpenAI({ baseURL: "https://api.venice.ai/api/v1" })`. Pass `venice_parameters: { include_venice_system_prompt: false }` in every call. Models: `qwen3-5-9b` (compiler), `zai-org-glm-5-1` (analyst), `llama-3.3-70b` (agent ReAct loop).
@@ -69,7 +69,9 @@ NEXT_PUBLIC_CLOVE_SESSION_ADDRESS   # 1Shot wallet address (public)
 VENICE_API_KEY                      # OpenAI-compat key for Venice
 MONGODB_URI                         # mongodb+srv://... → DB name hardcoded as "clove"
 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID
-BASE_SEPOLIA_RPC / NEXT_PUBLIC_BASE_SEPOLIA_RPC
+BASE_RPC                            # Base mainnet RPC (optional; defaults to public RPC)
+ONESHOT_METHOD_*                    # 5 contract-method UUIDs — REQUIRED for on-chain execution
+CLOVE_INTERNAL_SECRET               # REQUIRED for internal TTS/image x402 calls
 CLOVE_PAY_TO_ADDRESS                # x402 fee recipient
 TAVILY_API_KEY / FAL_API_KEY / EXA_API_KEY   # optional — skip gracefully if missing
 CRON_SECRET                         # Vercel cron auth header
@@ -101,7 +103,7 @@ CRON_SECRET                         # Vercel cron auth header
 
 `src/lib/aiCompiler.ts` defines `NodeType`. Key ones: `trigger`, `budget`, `intelligence` (Venice x402), `intelligence-tavily`, `risk-check`, `compare-apy`, `sentiment-check`, `defi-lend` (Morpho), `defi-swap` (Uniswap), `defi-stake` (Lido), `defi-save` (Sky), `defi-lp` (Aerodrome), `notify`. Node styles/colors in `src/components/BlueprintCanvas.tsx → NODE_STYLES`.
 
-## Protocol Addresses (Base Sepolia)
+## Protocol Addresses (Base mainnet)
 
 Defined in `src/lib/protocols/addresses.ts`. Key: Morpho Blue `0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb`, Morpho Moonwell USDC vault `0xc1256Ae5FF1cf2719D4937adb3bbCCab2E00A2Ca`.
 

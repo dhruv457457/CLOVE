@@ -35,6 +35,7 @@ Question types available:
 - "text": free text (use sparingly, 1 max)
 
 Always include questions about:
+- Agent type / archetype (FIRST question — see options below)
 - Protocol preference (which DeFi protocols)
 - Risk tolerance
 - Budget (slider, USDC, 1-500)
@@ -42,16 +43,31 @@ Always include questions about:
 - Notification style
 - Single agent vs. multi-agent orchestration team
 
+CLOVE supports these agent archetypes (the "agentType" question MUST use exactly these option strings):
+- "yield" — Finds and farms the best DeFi yields on Base
+- "polymarket" — Bets on Polymarket prediction markets (runs on Polygon)
+- "copy-trader" — Mirrors smart-money wallets when they converge (Base)
+- "narrative" — Catches social/narrative momentum early (Base)
+- "rebalancer" — Monitors real on-chain positions & rebalances to better yields (Base)
+Infer the most likely default from the user's prompt and list it first.
+
 Return ONLY valid JSON — no prose:
 {
   "summary": "One sentence describing what you understood the user wants",
   "questions": [
     {
+      "id": "agentType",
+      "label": "What kind of agent is this?",
+      "hint": "Each archetype perceives a different real data source and acts on its own",
+      "type": "single",
+      "options": ["yield", "polymarket", "copy-trader", "narrative", "rebalancer"]
+    },
+    {
       "id": "protocols",
       "label": "Which protocols should the agent use?",
       "hint": "Agents are pre-wired for all of these on Base mainnet",
       "type": "multi",
-      "options": ["Morpho", "Aave", "Uniswap", "Aerodrome", "Lido", "Sky / sUSDS"]
+      "options": ["Morpho", "Uniswap", "Aerodrome", "Lido", "Aave"]
     },
     {
       "id": "risk",
@@ -130,9 +146,15 @@ export async function POST(request: NextRequest) {
 function defaultQuestions(): Question[] {
   return [
     {
+      id: "agentType", label: "What kind of agent is this?",
+      hint: "Each archetype perceives a different real data source and acts on its own",
+      type: "single",
+      options: ["yield", "polymarket", "copy-trader", "narrative", "rebalancer"],
+    },
+    {
       id: "protocols", label: "Which protocols should the agent use?",
       hint: "All are live on Base mainnet", type: "multi",
-      options: ["Morpho", "Aave", "Uniswap", "Aerodrome", "Lido", "Sky / sUSDS"],
+      options: ["Morpho", "Uniswap", "Aerodrome", "Lido", "Aave"],
     },
     {
       id: "risk", label: "Risk tolerance?",

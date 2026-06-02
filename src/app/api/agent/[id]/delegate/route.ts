@@ -96,21 +96,23 @@ export async function POST(
       };
     } catch (e) {
       console.warn("[agent/delegate] 1Shot redelegate failed, recording as pending:", e);
-      // Bug 1 fix: on failure, use "0xdemo" — NEVER pass the parent's root context
-      // to the child.  A "pending" child with "0xdemo" context is blocked from
-      // spending; the user can re-grant permission to activate it.
+      // On failure, use "0xdemo" — NEVER pass the parent's root context to the child.
+      // A "pending" child with "0xdemo" context is blocked from spending; the user
+      // can re-grant permission to activate it.
       onChain = {
         context: "0xdemo",
-        hash:    "0xdemo-pending",
+        hash:    "0xunsigned",
         via:     "pending",
       };
     }
   } else {
-    // Demo mode — record parent-child link without on-chain context
+    // No active parent delegation — record the parent-child link in a blocked
+    // state. No fabricated hash: the child is "pending" and cannot spend until a
+    // real permission flows down.
     onChain = {
       context: "0xdemo",
-      hash:    "0xdemo-" + Math.random().toString(16).slice(2, 10),
-      via:     "demo",
+      hash:    "0xunsigned",
+      via:     "pending",
     };
   }
 

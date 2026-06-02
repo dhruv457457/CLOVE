@@ -85,6 +85,26 @@ export async function POST(request: NextRequest) {
           }
         }
 
+        // ── Guard: require a real ERC-7715 permission before running ─────────
+        // Agents without a real delegationContext cannot execute on-chain.
+        // Abort immediately with a clear error — never run in demo mode.
+        const hasRealCtx =
+          agent.delegationContext &&
+          agent.delegationContext !== "0xdemo" &&
+          agent.delegationContext !== "0x" &&
+          agent.delegationContext.length > 20 &&
+          !/^0x0*$/.test(agent.delegationContext);
+
+        if (!hasRealCtx) {
+          send("error", {
+            message:
+              "No real ERC-7715 permission found for this agent. " +
+              "Click 'Grant Permission' in the dashboard to sign a delegation before running.",
+            code: "needs-permission",
+          });
+          return;
+        }
+
         // ── Mark agent as planning ─────────────────────────────────────────────
         await bumpAgentCounters(agent.id, { status: "planning", ranOnce: true });
         send("status", { phase: "planning" });
@@ -97,7 +117,7 @@ export async function POST(request: NextRequest) {
         // MEM-1 fix: pass agentId so each agent in a team sees only its own history
         const memoryPrompt = await buildMemoryPrompt(agent.walletAddress, agent.id);
         const insights     = await getRelevantInsights(agent.id, agent.walletAddress, agent.goal, 6);
-        const plan: Plan   = await veniceGeneratePlan(agent.goal, memoryPrompt, insights);
+        const plan: Plan   = await veniceGeneratePlan(agent.goal, memoryPrompt, insights, agent.agentType);
 
         const planId = await emit("plan", {
           reasoning: plan.reasoning,
@@ -119,6 +139,8 @@ export async function POST(request: NextRequest) {
           budgetUsdc:         agent.budgetUsdc,
           agentId:            agent.id,
           budgetUsedUsdc:     agent.budgetUsedUsdc,
+          chainId:            agent.chainId,
+          typeConfig:         agent.typeConfig,
         };
 
         const allToolResults: ToolCallResult[] = [];
@@ -146,10 +168,22 @@ export async function POST(request: NextRequest) {
           for (const r of subResults) {
             if (r.cost)   x402Total += r.cost;
             if (r.txHash) { txHashSeen = r.txHash; executedOnce = true; }
+            // BREAK-4: accumulate spend within this run so the next executeDefi
+            // call in the same run sees the updated used amount in the budget guard.
+            if (r.tool === "executeDefi" && r.txHash) {
+              // BREAK-4 fix: r.args.amount is the USDC string the agent passed in
+              // (e.g. "0.1"), not the Wei bigint from defaultAmount. Use args, not result.
+              const spent = parseFloat(String(r.args?.amount ?? "0")) || 0;
+              ctx.budgetUsedUsdc = (ctx.budgetUsedUsdc ?? 0) + spent;
+            }
 
-            // Detect action type for `lastAction`
-            if (r.tool === "executeDefi" && (r.txHash || /"prepared":\s*true/.test(r.result))) lastAction = "deposit";
-            if (r.tool === "rebalance"   && (r.txHash || /"prepared":\s*true/.test(r.result))) lastAction = "rebalance";
+            // Detect action type for `lastAction`. HONEST: only count an action as
+            // executed when it was actually broadcast on-chain (real txHash, or 1Shot
+            // returned submitted:true). "prepared:true" is mere calldata that was never
+            // submitted — reporting it as a deposit/rebalance would fabricate an outcome.
+            const wasSubmitted = !!r.txHash || /"submitted":\s*true/.test(r.result);
+            if (r.tool === "executeDefi" && wasSubmitted) lastAction = "deposit";
+            if (r.tool === "rebalance"   && wasSubmitted) lastAction = "rebalance";
 
             // Handle revisePlan: swap the rest of the queue
             if (r.tool === "revisePlan" && r.isMeta && Array.isArray(r.args.newSubgoals)) {
@@ -160,6 +194,38 @@ export async function POST(request: NextRequest) {
               await emit("plan", { revised: true, newCount: queue.length }, subgoalId);
             }
           }
+        }
+
+        // ── FORCED EXECUTION ──────────────────────────────────────────────────
+        // Venice's ReAct loop is non-deterministic and often "holds" even when the
+        // goal explicitly says to execute. When the user's goal demands immediate
+        // execution and the loop didn't broadcast a tx, force a direct executeDefi
+        // so the intent is honored deterministically. This is a REAL on-chain call
+        // via the relayer — not a simulation.
+        const wantsImmediate = /execute\s+immediately|execute\s+now|just\s+execute|supply\s+\$?\d/i.test(agent.goal);
+        if (!executedOnce && wantsImmediate) {
+          // Parse amount + protocol from the goal (fallbacks if absent).
+          const amtMatch = agent.goal.match(/\$?\s*(\d+(?:\.\d+)?)\s*USDC/i);
+          const amount   = amtMatch ? amtMatch[1] : "1";
+          const protoMatch = agent.goal.toLowerCase().match(/\b(morpho|aave|uniswap|aerodrome|lido)\b/);
+          const protocol = protoMatch ? protoMatch[1] : "aave";
+
+          await emit("plan", { observation: `Goal requires immediate execution — forcing executeDefi(${protocol}, ${amount} USDC).` }, planId, { x: 380, y: canvasY });
+          canvasY += 100;
+
+          const forced = await executeTool("executeDefi", {
+            protocol, amount, action: "deposit",
+            reasoning: "Forced execution: goal demands immediate on-chain action.",
+          }, ctx);
+          allToolResults.push(forced);
+
+          let fparsed: Record<string, unknown> = {};
+          try { fparsed = JSON.parse(forced.result) as Record<string, unknown>; } catch { /**/ }
+          await emit("tool-result", { tool: "executeDefi", ...fparsed, txHash: forced.txHash }, planId, { x: 600, y: canvasY });
+          canvasY += 120;
+
+          const fSubmitted = !!forced.txHash || /"submitted":\s*true/.test(forced.result);
+          if (fSubmitted) { txHashSeen = forced.txHash; executedOnce = true; lastAction = "deposit"; }
         }
 
         // If no executeDefi succeeded, the action was HOLD
@@ -174,23 +240,34 @@ export async function POST(request: NextRequest) {
         // Embed the insight for semantic retrieval in future runs
         const insightEmbedding = await embedText(reflection.insight).catch(() => undefined);
 
-        // Determine scope: agents in a delegation chain share insights with their team
-        // (Scout's "Morpho volatile" insight surfaces in Executor's plan)
-        const insightScope = agent.parentAgentId ? "team" : "agent";
-
-        // Walk to root for team-scoped insights
-        let rootAgentId: string | undefined;
-        if (insightScope === "team") {
+        // ── Determine scope and root for insight storage ─────────────────────
+        // Walk up the parentAgentId chain to find the root of this delegation tree.
+        // rootAgentId is shared across all agents in a Scout→Risk→Executor chain,
+        // so team-scoped insights are visible to all members of the same workflow.
+        let rootAgentId: string = agent.id;
+        {
           let cur: Agent | null = agent;
           const seen = new Set<string>();
           while (cur?.parentAgentId && !seen.has(cur.id)) {
             seen.add(cur.id);
-            cur = await getAgent(cur.parentAgentId);
+            const parent = await getAgent(cur.parentAgentId);
+            if (!parent) break;
+            cur = parent;
           }
-          rootAgentId = cur?.id;
-        } else {
-          rootAgentId = agent.id;  // root agent IS its own team root
+          rootAgentId = cur?.id ?? agent.id;
         }
+
+        // Check if this agent has children — used to decide team broadcast scope.
+        const { listChildAgents } = await import("@/lib/agent/agents");
+        const childAgents = await listChildAgents(agent.id);
+        const isCoordinator = childAgents.length > 0;      // Scout, Risk Monitor
+        const isInChain     = !!agent.parentAgentId || isCoordinator; // any member of a multi-agent team
+
+        // A2A-1 core fix: use "team" scope for any agent that's part of a chain.
+        // Old logic: parent-less agents (Scout) got scope "agent" — their insights
+        // were invisible to children. Now: all chain members broadcast as "team"
+        // so Scout's checkYields findings appear in Risk Monitor's and Executor's plans.
+        const insightScope = isInChain ? "team" : "agent";
 
         await saveInsight({
           agentId:       agent.id,
@@ -203,14 +280,14 @@ export async function POST(request: NextRequest) {
           embedding:     insightEmbedding,
         });
 
-        // A2A-1: Broadcast key tool results as team insights so downstream agents
-        // (Risk Monitor, Executor) can read Scout's yield data and decisions.
-        // Only broadcast if this agent has children (i.e. it IS a Scout / coordinator).
-        if (rootAgentId && allToolResults.length > 0) {
+        // A2A-1: Broadcast raw tool findings (yields, risk) as a separate team insight
+        // so downstream agents get structured data, not just the reflection summary.
+        // Only emit when this agent is upstream (coordinator/Scout) — not for leaf Executors.
+        if (isCoordinator && allToolResults.length > 0) {
           const teamFindings = allToolResults
             .filter(r => r.tool === "checkYields" || r.tool === "checkRisk")
-            .map(r => `[${r.tool}] ${r.result.slice(0, 300)}`)
-            .join(" | ");
+            .map(r => `[${r.tool}] ${r.result.slice(0, 400)}`)
+            .join("\n---\n");
           if (teamFindings) {
             const teamEmbedding = await embedText(teamFindings).catch(() => undefined);
             await saveInsight({
@@ -218,8 +295,8 @@ export async function POST(request: NextRequest) {
               walletAddress: agent.walletAddress,
               rootAgentId,
               runId,
-              text:          `Run findings from ${agent.name}: ${teamFindings}`,
-              tags:          [...reflection.tags, "team-broadcast"],
+              text:          `TEAM DATA from ${agent.name} (runId ${runId.slice(-8)}):\n${teamFindings}`,
+              tags:          [...reflection.tags, "team-data", "latest-run"],
               scope:         "team",
               embedding:     teamEmbedding,
             });
@@ -241,7 +318,6 @@ export async function POST(request: NextRequest) {
           (agent.mediaPolicy === "milestones" && lastAction !== "hold" && lastAction !== "skip");
         // mediaPolicy: "off" or "daily" → skipped here (daily handled by separate cron)
 
-        let voiceUrl: string | undefined;
         let imageUrl: string | undefined;
 
         if (shouldGenerateMedia) {
@@ -261,10 +337,13 @@ export async function POST(request: NextRequest) {
               signal: AbortSignal.timeout(12000),
             });
             if (ttsRes.ok && ttsRes.headers.get("content-type")?.includes("audio")) {
-              // Telegram needs a public URL. For demo we encode into a data URL — Telegram won't accept
-              // data URLs for sendVoice, so instead we read X-Clove-Cost and trust the client to download.
-              x402Total += 0.005;
-              voiceUrl  = `${baseUrl}/api/x402/tts/last?runId=${runId}`; // placeholder, see note below
+              // Count the ACTUAL amount charged (from the service's X-Clove-Cost header),
+              // not a hardcoded guess. We do NOT advertise a voiceUrl here: Telegram
+              // rejects data URLs for sendVoice and there is no public audio host yet,
+              // so claiming a URL would be dishonest. Audio delivery is intentionally
+              // omitted until real hosting exists.
+              const charged = Number.parseFloat(ttsRes.headers.get("X-Clove-Cost") ?? "0");
+              if (Number.isFinite(charged)) x402Total += charged;
             } else {
               const j = await ttsRes.json().catch(() => ({}));
               if (j.skipped) console.log("[run-stream] TTS skipped:", j.reason);
@@ -293,12 +372,17 @@ export async function POST(request: NextRequest) {
             if (imgRes.ok) {
               const j = await imgRes.json();
               imageUrl = j.imageUrl;
-              if (!j.fallback) x402Total += 0.01;
+              // Count the ACTUAL amount charged from the service response, not a
+              // hardcoded guess. Fallback SVGs report costUsdc:0 / paid:false.
+              const charged = Number(j._clove?.costUsdc ?? 0);
+              if (j._clove?.paid && Number.isFinite(charged)) x402Total += charged;
             }
           } catch (e) { console.warn("[run-stream] image exception:", e); }
 
-          if (voiceUrl || imageUrl) {
-            await emit("media", { voiceUrl, imageUrl, service: "tts+image" }, reflectId, { x: 380, y: canvasY });
+          // Audio is generated + charged above but intentionally not surfaced as a
+          // URL (no public audio host yet), so the media node carries only the image.
+          if (imageUrl) {
+            await emit("media", { imageUrl, service: "image" }, reflectId, { x: 380, y: canvasY });
             canvasY += 140;
           }
         }
@@ -313,7 +397,6 @@ export async function POST(request: NextRequest) {
             body: JSON.stringify({
               richReport: {
                 text: `*${agent.name}* — ${reflection.insight}`,
-                voiceUrl: voiceUrl?.startsWith("http") ? voiceUrl : undefined,
                 imageUrl: imageUrl,
                 spending: {
                   x402Total: agent.x402SpentUsdc + x402Total,
@@ -328,6 +411,17 @@ export async function POST(request: NextRequest) {
 
         // ── Persist run summary + agent counters ───────────────────────────────
         // MEM-1 fix: store agentId so workflow history can attribute runs correctly
+        // Extract the actual executed amount from tool results (not total budget)
+        const executedAmount = (() => {
+          for (const r of allToolResults.slice().reverse()) {
+            if ((r.tool === "executeDefi" || r.tool === "rebalance") && r.txHash) {
+              const amt = parseFloat(String(r.args?.amount ?? "0")) || 0;
+              if (amt > 0) return String(amt);
+            }
+          }
+          return "0";
+        })();
+
         await saveRun({
           walletAddress: agent.walletAddress,
           agentId:       agent.id,
@@ -335,9 +429,16 @@ export async function POST(request: NextRequest) {
           success:       reflection.didSucceed,
           protocol:      extractProtocol(allToolResults) ?? "unknown",
           action:        lastAction ?? "hold",
-          amount:        agent.budgetUsdc,
+          amount:        executedAmount,          // actual executed USDC, not total budget
           apy:           extractApy(allToolResults) ?? 0,
-          riskLevel:     "LOW",
+          riskLevel:     (() => {
+            for (const r of allToolResults) {
+              if (r.tool === "checkRisk") {
+                try { const p = JSON.parse(r.result) as { riskLevel?: string }; if (p.riskLevel) return p.riskLevel; } catch { /**/ }
+              }
+            }
+            return "UNKNOWN";
+          })(),
           txHash:        txHashSeen ?? null,
           costPaid:      x402Total,
           veniceReason:  reflection.insight,

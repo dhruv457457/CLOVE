@@ -38,7 +38,7 @@ export interface ApySnapshot {
   timestamp: Date;
   yields: {
     morpho:    number;
-    sky:       number;
+    aave:      number;   // replaced Sky/sUSDS (no direct USDC deposit on Base)
     aerodrome: number;
     lido:      number;
     uniswap:   number;
@@ -340,7 +340,7 @@ export async function buildMemoryPrompt(walletAddress: string, agentId?: string)
   if (apyHistory.length >= 2) {
     lines.push("");
     lines.push("APY Trend (7d):");
-    for (const proto of ["morpho", "sky", "aerodrome", "lido"] as const) {
+    for (const proto of ["morpho", "aave", "aerodrome", "lido"] as const) {
       const trend = apyTrend(apyHistory, proto);
       if (trend !== "—") lines.push(`- ${proto}: ${trend}`);
     }

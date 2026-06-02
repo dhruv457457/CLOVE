@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getDb } from "@/lib/db/mongodb";
 import { findStalledAgents, transitionAgent, type Agent } from "@/lib/agent/agents";
+import { runRevocationMonitorForAll } from "@/lib/agent/revocationMonitor";
 
 export const maxDuration = 300;
 
@@ -129,10 +130,26 @@ export async function GET(request: NextRequest) {
     }
   }
 
+  // ── Auto-revocation monitor ─────────────────────────────────────────────────
+  // After running all agents, check every active agent for revocation conditions:
+  //   - Budget exhausted (≥95% cap)
+  //   - APY below configured minimum
+  //   - 3+ consecutive failures
+  //   - Stop-loss triggered
+  //   - ERC-7715 permission expired
+  //
+  // Off-chain detection; on-chain revocation via DelegationManager.disableDelegation()
+  const allActiveAgentIds = allAgents
+    .filter(a => a.delegationStatus === "active" && a.delegationContext !== "0xdemo")
+    .map(a => a.id);
+
+  const revocations = await runRevocationMonitorForAll(allActiveAgentIds, origin);
+
   return NextResponse.json({
     ran:              results.length,
     checked:          allAgents.length,
     stalledRecovered: stalled.length,
     results,
+    revocations: revocations.map(r => ({ agentId: r.agentId, reason: r.reason, revokeAll: r.revokeAll })),
   });
 }

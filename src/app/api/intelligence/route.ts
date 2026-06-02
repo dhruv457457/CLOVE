@@ -3,139 +3,22 @@ import { analyzeYieldsWithVenice } from "@/lib/venice/analyst";
 import { searchCryptoYields, searchCryptoNews } from "@/lib/tavily/client";
 import { searchProtocolYields } from "@/lib/exa/client";
 import { intelligenceCache, INTELLIGENCE_TTL_MS } from "@/lib/agent/cache";
+import { build402, verifyPayment } from "@/lib/x402/helpers";
+import { X402_PRICES } from "@/lib/config/env";
 
-const PRICE_USDC = 0.01;
-const NETWORK_ID = "eip155:8453"; // Base mainnet
-const PAY_TO = (
-  process.env.CLOVE_PAY_TO_ADDRESS ??
-  process.env.NEXT_PUBLIC_CLOVE_SESSION_ADDRESS ??
-  "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
-);
-
-const PROTOCOLS = ["Morpho", "Uniswap", "Aerodrome", "Lido", "Sky"];
-
-async function build402Response() {
-  let facilitators: string[] = [];
-  try {
-    const res = await fetch(
-      "https://tx-sentinel-base-mainnet.api.cx.metamask.io/platform/v2/x402",
-      { signal: AbortSignal.timeout(3000) }
-    );
-    if (res.ok) {
-      const data = await res.json();
-      facilitators = [
-        ...(data?.signers?.["eip155:8453"] ?? []),
-        ...(data?.signers?.["eip155:*"] ?? []),
-      ];
-    }
-  } catch { /* proceed without facilitators */ }
-
-  const paymentRequired = {
-    accepts: [{
-      scheme: "exact",
-      price: `$${PRICE_USDC}`,
-      network: NETWORK_ID,
-      payTo: PAY_TO,
-      extra: { assetTransferMethod: "erc7710", facilitators },
-    }],
-  };
-
-  const encoded = Buffer.from(JSON.stringify(paymentRequired)).toString("base64");
-  return NextResponse.json(
-    { error: "Payment Required" },
-    {
-      status: 402,
-      headers: {
-        "PAYMENT-REQUIRED": encoded,
-        "Access-Control-Expose-Headers": "PAYMENT-REQUIRED, PAYMENT-RESPONSE",
-      },
-    }
-  );
-}
-
-async function verifyPayment(paymentSig: string): Promise<boolean> {
-  // Bug 6 fix: random strings / "demo-internal" sentinels must not pass.
-  // The payment must at minimum be a valid base64-encoded JSON object with
-  // a permissionContext that looks like a real ERC-7710 delegation chain.
-  let payload: Record<string, unknown> = {};
-  try {
-    payload = JSON.parse(Buffer.from(paymentSig, "base64").toString("utf-8"));
-  } catch {
-    return false; // malformed base64 or JSON → reject
-  }
-
-  // Must contain a payload object with a permissionContext
-  const inner = payload.payload as Record<string, unknown> | undefined;
-  const permCtx = inner?.permissionContext as string | undefined;
-  const hasValidContext = typeof permCtx === "string" &&
-    permCtx.startsWith("0x") &&
-    permCtx.length > 20 &&
-    !permCtx.toLowerCase().includes("demo");
-
-  // Also allow internal server-to-server calls using the CLOVE_INTERNAL_SECRET
-  const isInternalCall = typeof payload.internalSecret === "string" &&
-    payload.internalSecret === process.env.CLOVE_INTERNAL_SECRET &&
-    !!process.env.CLOVE_INTERNAL_SECRET;
-
-  if (!hasValidContext && !isInternalCall) {
-    return false;
-  }
-
-  // Real on-chain payments (e.g., exact EVM scheme) have a txHash in the payload.
-  // Delegation-based (ERC-7710) and demo payments do not have a txHash.
-  // Only call 1Shot verify for payments that are expected to have a tx on-chain.
-  const hasTxHash = typeof payload.txHash === "string" && payload.txHash.startsWith("0x");
-  const isExactScheme = payload.scheme === "exact" && hasTxHash;
-
-  if (isExactScheme) {
-    const apiKey    = process.env.ONESHOT_API_KEY;
-    const apiSecret = process.env.ONESHOT_API_SECRET;
-    if (apiKey && apiSecret) {
-      try {
-        const tokenRes = await fetch("https://api.1shotapi.com/v0/token", {
-          method: "POST",
-          headers: { "Content-Type": "application/x-www-form-urlencoded" },
-          body: new URLSearchParams({
-            grant_type: "client_credentials",
-            client_id: apiKey,
-            client_secret: apiSecret,
-          }),
-          signal: AbortSignal.timeout(4000),
-        });
-        if (tokenRes.ok) {
-          const { access_token } = await tokenRes.json();
-          const verifyRes = await fetch("https://api.1shotapi.com/v0/x402/verify", {
-            method: "POST",
-            headers: { "Content-Type": "application/json", Authorization: `Bearer ${access_token}` },
-            body: JSON.stringify(payload),
-            signal: AbortSignal.timeout(5000),
-          });
-          if (verifyRes.ok) {
-            const { isValid } = await verifyRes.json();
-            return isValid === true;
-          }
-        }
-      } catch { /* fallthrough */ }
-    }
-  }
-
-  // ERC-7710 delegation payments, demo payments, and any non-exact-scheme
-  // payments are trusted without on-chain verification (they carry a
-  // cryptographic delegation chain that the client already validated).
-  return true;
-}
+const PRICE_USDC = X402_PRICES.intelligence;
+const PROTOCOLS = ["Morpho", "Uniswap", "Aerodrome", "Lido", "Aave"];
 
 export async function GET(request: NextRequest) {
   const paymentSig = request.headers.get("PAYMENT-SIGNATURE");
-  if (!paymentSig) return build402Response();
+  if (!paymentSig) return build402(PRICE_USDC);
 
   const valid = await verifyPayment(paymentSig);
   if (!valid) return NextResponse.json({ error: "Invalid payment" }, { status: 402 });
 
   // ── Cache hit? Return same intel for 5 min — DeFi yields don't change faster ──
-  // PROTO-2 fix: key by 5-minute UTC bucket so:
-  //   a) A bad/stale Venice response only poisons the current bucket, not all future ones
-  //   b) Errors are NEVER cached (only successful responses with bestApy > 0 are stored)
+  // Key by 5-minute UTC bucket so a bad/stale response only poisons the current
+  // bucket, and only successful responses (bestApy > 0) are ever stored.
   const bucket = Math.floor(Date.now() / INTELLIGENCE_TTL_MS);
   const CACHE_KEY = `intel:base:${bucket}`;
   const cached = intelligenceCache.get(CACHE_KEY) as Record<string, unknown> | undefined;
@@ -151,27 +34,40 @@ export async function GET(request: NextRequest) {
     process.env.TAVILY_API_KEY ? searchCryptoNews("DeFi yield Base") : Promise.reject("no key"),
   ]);
 
-  // ── Merge: Venice is primary, Tavily/Exa enrich ──────────────────────────
+  // ── Merge: Venice/DeFiLlama is primary, Tavily/Exa enrich ──────────────────
   const venice = veniceResult.status === "fulfilled" ? veniceResult.value : null;
   const tavily = tavilyResult.status === "fulfilled" ? tavilyResult.value : null;
   const exa    = exaResult.status    === "fulfilled" ? exaResult.value    : null;
   const news   = newsResult.status   === "fulfilled" ? newsResult.value   : null;
 
-  // Build enriched yield report
-  const sources: Record<string, boolean> = {
-    venice: !!venice,
-    tavily: !!tavily,
-    exa: !!exa,
+  const sources = {
+    defillama: !!(venice && venice.live.length > 0),
+    venice:    venice?.poweredBy === "venice+defillama",
+    tavily:    !!tavily,
+    exa:       !!exa,
   };
 
-  // Best APY: prefer Venice AI reasoning, validate with Exa data if available
-  let bestApy   = venice?.bestApy   ?? 8.4;
-  let recommended = venice?.recommended ?? "Morpho";
+  // Core yield data — REAL DeFiLlama numbers only. No hardcoded fallback.
+  let bestApy     = venice?.bestApy ?? 0;
+  let recommended = venice?.recommended ?? "";
 
+  // Build the per-protocol yields map from the REAL DeFiLlama rows.
+  const yields: Record<string, { apy: number; tvlUsd: number; risk: string; symbol: string }> = {};
+  for (const row of venice?.live ?? []) {
+    const key = row.protocol;
+    if (!yields[key] || row.apy > yields[key].apy) {
+      yields[key] = {
+        apy:    row.apy,
+        tvlUsd: row.tvlUsd,
+        risk:   row.ilRisk && row.ilRisk !== "no" ? "medium" : "low",
+        symbol: row.symbol,
+      };
+    }
+  }
+
+  // Cross-validate with Exa if it found a higher rate for a real protocol.
   if (exa && exa.length > 0) {
-    const exaBest = exa.reduce((best, r) =>
-      (r.apy ?? 0) > (best.apy ?? 0) ? r : best, exa[0]);
-    // Cross-validate: if Exa finds a higher rate for the same protocol, trust it
+    const exaBest = exa.reduce((best, r) => ((r.apy ?? 0) > (best.apy ?? 0) ? r : best), exa[0]);
     if (exaBest.apy && exaBest.apy > bestApy) {
       bestApy     = exaBest.apy;
       recommended = exaBest.protocol !== "Unknown" ? exaBest.protocol : recommended;
@@ -179,12 +75,12 @@ export async function GET(request: NextRequest) {
   }
 
   const response = {
-    // Core yield data
     bestApy,
     recommended,
-    reason: venice?.reason ?? `${recommended} currently offers the best risk-adjusted yield on Base.`,
+    reason: venice?.reason ?? (recommended ? `${recommended} currently offers the best risk-adjusted yield on Base.` : "No live yield data available."),
+    analysis: venice?.analysis ?? "",
+    error: venice?.error,
 
-    // Enriched market intelligence
     marketIntel: {
       tavilyAnswer: tavily?.answer,
       newsHeadline: news?.results?.[0]?.title,
@@ -196,28 +92,20 @@ export async function GET(request: NextRequest) {
       })),
     },
 
-    // All yields from Venice
-    yields: venice?.yields ?? {
-      morpho: { apy: 8.4, tvl: "$2.1B", risk: "low" },
-      aave:   { apy: 5.2, tvl: "$12B", risk: "low" },
-      sky:    { apy: 6.5, tvl: "$890M", risk: "low" },
-      lido:   { apy: 3.8, tvl: "$38B", risk: "low" },
-      aerodrome: { apy: 12.3, tvl: "$420M", risk: "medium" },
-    },
+    yields,
 
-    // Metadata
     _clove: {
       paid: true,
       costUsdc: PRICE_USDC,
       via: "x402 + ERC-7710",
       sources,
+      source: "defillama",
       timestamp: Date.now(),
     },
   };
 
-  // PROTO-2 fix: only cache if Venice returned a real APY (> 0).
-  // A rate-limited or errored Venice response has bestApy: 0 — don't cache it.
-  if ((response.bestApy as number) > 0) {
+  // Only cache real, non-empty results (bestApy > 0). Empty/errored intel is never cached.
+  if (response.bestApy > 0) {
     intelligenceCache.set(CACHE_KEY, response, INTELLIGENCE_TTL_MS);
   }
 

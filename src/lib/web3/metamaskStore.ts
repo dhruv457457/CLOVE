@@ -8,34 +8,33 @@ import {
   type GrantedPermission,
   type RevocationResult,
 } from "./permissions";
-// Lightweight no-op terminal logger (replaces deleted walletEmulator)
+
 const terminalStore = {
   addLog(_type: "info" | "success" | "warning" | "error" | "meta", message: string) {
     if (typeof console !== "undefined") console.log(`[mm:${_type}]`, message);
   },
 };
 
-export type MetaMaskMode = "disconnected" | "connecting" | "connected" | "flask";
+// "flask" mode removed — ERC-7715 is supported by MetaMask v12+ without Flask.
+export type MetaMaskMode = "disconnected" | "connecting" | "connected";
 
 export interface MetaMaskState {
-  mode: MetaMaskMode;
-  isFlask: boolean; // kept for compat but always true — MM v12+ supports ERC-7715 natively
-  userAddress: `0x${string}` | null;
+  mode:           MetaMaskMode;
+  userAddress:    `0x${string}` | null;
   sessionAddress: `0x${string}` | null;
-  permission: GrantedPermission | null;
-  isRevoking: boolean;
+  permission:     GrantedPermission | null;
+  isRevoking:     boolean;
 }
 
 type Listener = () => void;
 
 class MetaMaskStore {
   private state: MetaMaskState = {
-    mode: "disconnected",
-    isFlask: true,
-    userAddress: null,
+    mode:           "disconnected",
+    userAddress:    null,
     sessionAddress: null,
-    permission: null,   // loaded async from MongoDB after wallet connects
-    isRevoking: false,
+    permission:     null,   // loaded async from MongoDB after wallet connects
+    isRevoking:     false,
   };
 
   private listeners = new Set<Listener>();
@@ -59,7 +58,6 @@ class MetaMaskStore {
 
     this.state = {
       ...this.state,
-      isFlask: true,
       userAddress,
       mode: userAddress ? "connected" : "disconnected",
     };
@@ -84,7 +82,6 @@ class MetaMaskStore {
       this.state = {
         ...this.state,
         userAddress: address,
-        isFlask: true,
         mode: "connected",
       };
       this.notify();
@@ -179,7 +176,7 @@ class MetaMaskStore {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           permissionsContext: permission.permissionsContext,
-          expiresAt: permission.expiresAt,
+          expiresAt:          permission.expiresAt,
         }),
       })
         .then(r => r.json())
@@ -225,7 +222,7 @@ class MetaMaskStore {
   }
 
   clearLocalPermission() {
-    void this.deletePermissionFromDb();   // best-effort, non-blocking
+    void this.deletePermissionFromDb();
     this.state = { ...this.state, permission: null };
     this.log("warning", "Permission cleared (removed from DB, not revoked on-chain).");
     this.notify();
@@ -233,12 +230,11 @@ class MetaMaskStore {
 
   disconnect() {
     this.state = {
-      mode: "disconnected",
-      isFlask: true,
-      userAddress: null,
+      mode:           "disconnected",
+      userAddress:    null,
       sessionAddress: null,
-      permission: null,
-      isRevoking: false,
+      permission:     null,
+      isRevoking:     false,
     };
     this.notify();
   }

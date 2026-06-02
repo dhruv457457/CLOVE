@@ -30,8 +30,11 @@ export async function POST(
     return NextResponse.json({ error: "Missing permissionsContext or delegationManagerAddress" }, { status: 400 });
   }
 
+  // Preserve the existing parentAgentId — do NOT overwrite it with null.
+  // When Scan's "Grant All" calls this for child agents (Risk Guard, Executor),
+  // their Scout→Risk→Executor chain must stay intact so canvas edges render correctly.
   await setDelegation(id, {
-    parentAgentId:            null,  // root — comes from the user
+    parentAgentId:            agent.parentAgentId ?? null,
     delegationContext:        body.permissionsContext,
     delegationHash:           body.delegationHash,
     delegationManagerAddress: body.delegationManagerAddress,
