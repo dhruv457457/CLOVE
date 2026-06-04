@@ -44,6 +44,12 @@ function buildTypeConfig(agentType: AgentType, answers: Answers, prompt: string)
   }
 }
 
+/** Pull EVM wallet addresses out of free text (for copy-trader scouts). */
+function extractWallets(prompt: string): string[] {
+  const matches = prompt.match(/0x[a-fA-F0-9]{40}/g) ?? [];
+  return [...new Set(matches.map(a => a.toLowerCase()))];
+}
+
 /** Cheap topic extractor for Polymarket agents created from free text. */
 function extractTopic(prompt: string): string {
   const p = prompt.toLowerCase();
@@ -89,12 +95,18 @@ export async function POST(request: NextRequest) {
   const typeConfig  = buildTypeConfig(agentType, answers, prompt);
   // Budget: explicit answer wins, else the registry's per-type default (not a hardcoded "10").
   const budget      = String(answers.budget ?? typeDef.defaultBudget);
-  // The new "true agent" archetypes are inherently single specialized agents —
-  // the Scout/Risk/Executor team only makes sense for the generic yield flow.
-  const isSpecialized = agentType !== "yield";
+  // Team-capable archetypes can fan out into a Scout-swarm → Analyzer → Risk →
+  // Executor team. "yield" and "rebalancer" both manage capital across multiple
+  // protocols, so the per-protocol scout fan-out makes sense for both.
+  // polymarket / copy-trader / narrative remain inherently single agents.
+  const TEAM_CAPABLE: AgentType[] = ["yield", "rebalancer", "copy-trader"];
+  const wantsMulti =
+    orchestration.toLowerCase().includes("multi") || orchestration === "Decide for me";
+  const isMulti      = wantsMulti && TEAM_CAPABLE.includes(agentType);
 
-  const isMulti      = !isSpecialized &&
-    (orchestration.toLowerCase().includes("multi") || orchestration === "Decide for me");
+  // A type is treated as a single specialized agent when it's NOT "yield" and
+  // it is NOT going multi (e.g. rebalancer-single, or any polymarket/narrative/copy).
+  const isSpecialized = agentType !== "yield" && !isMulti;
 
   // ── Build enriched goal ────────────────────────────────────────────────────
   // LLM-5 fix: "Aave" is not in executeDefi's protocol enum — use only valid protocols
@@ -114,9 +126,13 @@ export async function POST(request: NextRequest) {
   :                                       "Execute on LOW or MEDIUM risk; skip only on HIGH risk.";
   const scheduleClause = schedule === "Every hour" ? "Run every hour." : `Run ${schedule.toLowerCase()}.`;
 
-  // Map schedule string → cron interval ms (used by /api/agent/cron)
+  // Map schedule string → cron interval ms (used by /api/agent/cron).
+  // "Every minute" / "Every 5 minutes" are demo-speed intervals so on-chain
+  // results show up quickly without waiting an hour.
   const scheduleIntervalMs: number | undefined =
-      schedule === "Every hour"      ? 60  * 60 * 1000
+      schedule === "Every minute"    ? 60 * 1000
+    : schedule === "Every 5 minutes" ? 5   * 60 * 1000
+    : schedule === "Every hour"      ? 60  * 60 * 1000
     : schedule === "Every 6 hours"   ? 6   * 60 * 60 * 1000
     : schedule === "Daily"           ? 24  * 60 * 60 * 1000
     : schedule === "Weekly"          ? 7   * 24 * 60 * 60 * 1000
@@ -130,10 +146,12 @@ export async function POST(request: NextRequest) {
   // PROTO-1 fix: use the actual periodDays from answers (defaulting to 30 only as fallback).
   // The questionnaire captures schedule; map it to a sensible period.
   const periodDays = typeof answers.periodDays === "number" ? answers.periodDays
-    : schedule === "Weekly"        ? 7
-    : schedule === "Every hour"    ? 1
-    : schedule === "Every 6 hours" ? 1
-    :                                30;  // daily / default
+    : schedule === "Weekly"          ? 7
+    : schedule === "Every minute"    ? 1
+    : schedule === "Every 5 minutes" ? 1
+    : schedule === "Every hour"      ? 1
+    : schedule === "Every 6 hours"   ? 1
+    :                                  30;  // daily / default
 
   // ── Create the workflow envelope (one per prompt) ─────────────────────────
   const workflow = await createWorkflow({
@@ -265,64 +283,122 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ agents: [agent], workflow, wired: false });
   }
 
-  // ── Multi-agent team ───────────────────────────────────────────────────────
-  // Context-aware names — no more "Scout — Yield Yield Hunter" or hardcoded "Risk Monitor"
-  const scoutName    = inferRoleName("scout",    prompt, protocols);
-  const riskName     = inferRoleName("risk",     prompt, protocols);
-  const executorName = inferRoleName("executor", prompt, protocols);
-
-  // 1. Scout — fetches yields + risk data
-  const scout = await createAgent({
-    walletAddress,
-    name:       scoutName,
-    goal:       `Research yields on ${protoList}. Call checkYields and checkRisk. Report findings. ${riskClause} Budget: ${budget} USDC.`,
-    budgetUsdc: budget,
-    mediaPolicy: "off",
-    position:   { x: 80,  y: 200 },
-    workflowId: workflow.id,
-  });
-  await addAgentToWorkflow(workflow.id, scout.id);
-
-  // 2. Risk Monitor — validates signals, decides action
-  const riskMonitor = await createAgent({
-    walletAddress,
-    name:       riskName,
-    goal:       `Evaluate market risk signals from the ${scoutName}. Decide: deposit, hold, or rebalance. ${riskClause} Never act if risk is HIGH.`,
-    budgetUsdc: budget,
-    mediaPolicy: "off",
-    position:   { x: 420, y: 200 },
-    workflowId: workflow.id,
-  });
-  await addAgentToWorkflow(workflow.id, riskMonitor.id);
-
-  // 3. Executor — executes DeFi transactions + notifies (this is the one cron drives)
-  const executor = await createAgent({
-    walletAddress,
-    name:       executorName,
-    goal:       `Execute DeFi transactions approved by ${riskName}. Protocols: ${protoList}. ${scheduleClause} ${notify.includes("Telegram message") ? "Report via Telegram after each execution." : ""}`,
-    budgetUsdc: budget,
-    scheduleIntervalMs,  // only the Executor runs on schedule; Scout/Risk are invoked by it
-    workflowId: workflow.id,
-    mediaPolicy,
-    position:   { x: 760, y: 200 },
-  });
-  await addAgentToWorkflow(workflow.id, executor.id);
-
-  // 4. Auto-wire delegation: Scout → Risk Monitor → Executor
+  // ── Multi-agent team — generalized scout fan-out ───────────────────────────
+  // Topology:   [Scout × N]  →  Convergence Analyzer  →  Risk Monitor  →  Executor
   //
-  // WF-1 fix: each link in the chain gets its OWN capped sub-delegation via
-  // 1Shot redelegateWithDelegationData — NOT the same root context.
-  // Without this, all agents share the root budget with no isolation.
-  //
-  // STRICT/honest: when there is no real granted permission we do NOT fabricate a
-  // delegation. We record the blocked sentinel "0xdemo" with a fixed "0xunsigned"
-  // hash (NO Math.random fake hashes). setDelegation() then marks the agent
-  // "pending" — it cannot spend until a real ERC-7715 permission is granted.
+  // The "scout dimension" varies by agent type:
+  //   • yield / rebalancer → one scout per PROTOCOL (Morpho, Aave, …)
+  //   • copy-trader        → one scout per WHALE WALLET (each tracks one address)
+  // The Analyzer aggregates scout findings and decides; the Risk Monitor gates;
+  // the Executor performs the on-chain action and reports. The Analyzer holds the
+  // root permission; scouts are read-only (no spend); spending flows
+  // Analyzer → Risk → Executor via scoped 1Shot sub-delegations.
+
+  type ScoutUnit = {
+    name:  string;          // node title, e.g. "Morpho Scout" / "Whale 0x1234 Scout"
+    goal:  string;          // scout system goal
+    badge: string;          // short label for logs / chain summary
+  };
+
+  // Build the scout units + role goals for this agent type.
+  let scoutUnits: ScoutUnit[];
+  let scoutAgentType: AgentType;
+  let analyzerName: string;
+  let analyzerGoal: string;
+  let riskName: string;
+  let riskGoal: string;
+  let executorName: string;
+  let executorGoal: string;
+
+  if (agentType === "copy-trader") {
+    // Scouts = whale wallets (from answers.wallets or parsed from the prompt).
+    const fromAnswers = Array.isArray(answers.wallets) ? (answers.wallets as string[]) : [];
+    const wallets = (fromAnswers.length > 0 ? fromAnswers : extractWallets(prompt))
+      .filter(w => /^0x[a-fA-F0-9]{40}$/.test(w));
+    // Fallback so the team is never empty — placeholder whales the user can edit.
+    const finalWallets = wallets.length > 0 ? wallets : [
+      "0x0000000000000000000000000000000000000001",
+      "0x0000000000000000000000000000000000000002",
+      "0x0000000000000000000000000000000000000003",
+    ];
+    const shortW = (w: string) => `${w.slice(0, 6)}…${w.slice(-4)}`;
+    scoutUnits = finalWallets.map(w => ({
+      name:  `Whale ${shortW(w)} Scout`,
+      badge: shortW(w),
+      goal:
+        `Track smart-money wallet ${w} on Base. Call checkWhaleTrades scoped to ${w}. ` +
+        `Report every buy/sell (token, side, size, timestamp) to shared team memory so the ` +
+        `Convergence Detector can spot when multiple whales agree. Read-only — never trade.`,
+    }));
+    scoutAgentType = "copy-trader";
+    analyzerName = "Convergence Detector";
+    analyzerGoal =
+      `You are the convergence detector for a ${finalWallets.length}-whale copy-trading desk. ` +
+      `Read every wallet scout's findings from shared team memory. Identify tokens that MULTIPLE ` +
+      `whales (2 or more) bought within the same short window — that convergence is the signal. ` +
+      `Output the converged token, how many whales agree, and the net direction. ${riskClause}`;
+    riskName = "Risk Monitor";
+    riskGoal =
+      `Review the Convergence Detector's signal. Approve a copy-trade ONLY if the token has healthy ` +
+      `liquidity and is not a honeypot/scam, and the convergence is genuine (2+ independent whales). ${riskClause} ` +
+      `If approved, hand the trade to the Executor; otherwise hold and report why.`;
+    executorName = "Copy-Trade Executor";
+    executorGoal =
+      `${prompt.trim()} ` +
+      `Mirror the trade approved by the Risk Monitor using checkRisk then executeCopyTrade. ${scheduleClause} ` +
+      (notify.includes("Telegram message") ? "Report every copied trade via Telegram." : "");
+  } else {
+    // yield / rebalancer → one scout per protocol.
+    const scoutProtocols = protocols.length > 0 ? protocols : ["Morpho", "Aave", "Lido"];
+    scoutUnits = scoutProtocols.map(proto => ({
+      name:  `${proto} Scout`,
+      badge: proto,
+      goal:
+        `Research live yield + risk for ${proto} on Base. Call checkYields and checkRisk scoped to ${proto}. ` +
+        `Report APY, TVL, and risk level to shared team memory so the Convergence Analyzer can rank it. Read-only — never deposit.`,
+    }));
+    scoutAgentType = "yield";
+    analyzerName = "Convergence Analyzer";
+    analyzerGoal =
+      `You are the convergence analyzer for a ${scoutProtocols.length}-protocol portfolio. ` +
+      `Collect the latest findings from every protocol scout (${scoutProtocols.join(", ")}) via shared team memory. ` +
+      `Rank protocols by risk-adjusted yield (APY weighted by risk + TVL). ` +
+      `Select the BEST and SECOND-BEST protocol and pass the ranking to the Risk Monitor. ${riskClause}`;
+    riskName = "Risk Monitor";
+    riskGoal =
+      `Review the Convergence Analyzer's best/second-best ranking. Approve the allocation ONLY if the selected protocols are within the user's risk tolerance. ${riskClause} ` +
+      `If approved, hand the allocation to the Executor; otherwise hold and report why.`;
+    executorName = inferRoleName("executor", prompt, protocols);
+    executorGoal =
+      `${prompt.trim()} ` +
+      `Execute the allocation approved by the Risk Monitor across: ${protoList}. ${scheduleClause} ` +
+      (notify.includes("Telegram message") ? "Report every decision via Telegram." : "");
+  }
+
+  // Vertical layout for the scout column, with the decision chain centered.
+  const SCOUT_X   = 60;
+  const SCOUT_Y0  = 40;
+  const SCOUT_DY  = 150;
+  const centerY   = SCOUT_Y0 + ((scoutUnits.length - 1) * SCOUT_DY) / 2;
+
   const UNSIGNED_HASH = "0xunsigned";
   const hasRealPermission = _isRealPerm;
 
-  // Bind root permission to Scout first
-  await setDelegation(scout.id, {
+  // 1. Convergence Analyzer/Detector — delegation root + aggregator.
+  const analyzer = await createAgent({
+    walletAddress,
+    name:        analyzerName,
+    goal:        analyzerGoal,
+    budgetUsdc:  budget,
+    mediaPolicy: "off",
+    position:    { x: 420, y: centerY },
+    workflowId:  workflow.id,
+    agentType,
+  });
+  await addAgentToWorkflow(workflow.id, analyzer.id);
+
+  // Bind root permission to the Analyzer.
+  await setDelegation(analyzer.id, {
     parentAgentId:            null,
     delegationContext:        hasRealPermission ? effectivePermContext! : "0xdemo",
     delegationHash:           hasRealPermission ? "0xpending" : UNSIGNED_HASH,
@@ -330,9 +406,35 @@ export async function POST(request: NextRequest) {
     delegationCap:            budget,
   });
 
-  // Helper: build a real sub-delegation from a parent context to a child address.
-  // No real permission (or a failed redelegation) → honest blocked sentinel, never fabricated.
-  async function buildSubContext(parentCtx: string, childAgent: typeof scout): Promise<{ context: string; hash: string }> {
+  // 2. Scouts — one per unit, research-only (no spend), children of Analyzer.
+  const scouts: Awaited<ReturnType<typeof createAgent>>[] = [];
+  for (let i = 0; i < scoutUnits.length; i++) {
+    const unit = scoutUnits[i];
+    const scout = await createAgent({
+      walletAddress,
+      name:        unit.name,
+      goal:        unit.goal,
+      budgetUsdc:  "0",
+      mediaPolicy: "off",
+      position:    { x: SCOUT_X, y: SCOUT_Y0 + i * SCOUT_DY },
+      workflowId:  workflow.id,
+      agentType:   scoutAgentType,
+    });
+    await addAgentToWorkflow(workflow.id, scout.id);
+    // Research-only: parented to the Analyzer for orchestration, but capped to 0
+    // (honest non-spending sentinel — marked "pending", can never transact).
+    await setDelegation(scout.id, {
+      parentAgentId:            analyzer.id,
+      delegationContext:        "0xresearch-only",
+      delegationHash:           UNSIGNED_HASH,
+      delegationManagerAddress: "0x",
+      delegationCap:            "0",
+    });
+    scouts.push(scout);
+  }
+
+  // Helper: build a real scoped sub-delegation from a parent context to a child.
+  async function buildSubContext(parentCtx: string, childAgent: Awaited<ReturnType<typeof createAgent>>): Promise<{ context: string; hash: string }> {
     if (!hasRealPermission || parentCtx === "0xdemo") {
       return { context: "0xdemo", hash: UNSIGNED_HASH };
     }
@@ -344,29 +446,59 @@ export async function POST(request: NextRequest) {
       const chain = [JSON.parse(result.parent), JSON.parse(result.redelegation)];
       return {
         context: "0x" + Buffer.from(JSON.stringify(chain)).toString("hex"),
-        hash:    "0xpending",  // real hash computed on first revoke attempt
+        hash:    "0xpending",
       };
     } catch (e) {
-      console.warn("[from-answers] sub-delegation failed, recording as blocked (pending):", e);
-      // Never leak the parent context down — record the blocked sentinel instead.
-      return { context: "0xdemo", hash: UNSIGNED_HASH };
+      console.warn("[from-answers] sub-delegation failed — falling back to parent context so the spender stays executable:", e);
+      // 1Shot redelegation is unavailable (it 500s). Rather than blocking the
+      // whole chain (which leaves the Executor unable to ever transact), fall
+      // back to the PARENT context. The redeemer is always CLOVE's 1Shot wallet,
+      // so the root ERC-7715 context is still valid for execution — we just lose
+      // per-agent scope isolation until redelegation is fixed. This mirrors the
+      // runtime behaviour of liveRedelegate() in the orchestrate route.
+      return { context: parentCtx, hash: "0xpending" };
     }
   }
 
-  // Scout → Risk Monitor (scoped sub-delegation, capped to budget)
+  // 3. Risk Monitor — gates the action on risk tolerance.
+  const riskMonitor = await createAgent({
+    walletAddress,
+    name:        riskName,
+    goal:        riskGoal,
+    budgetUsdc:  budget,
+    mediaPolicy: "off",
+    position:    { x: 760, y: centerY },
+    workflowId:  workflow.id,
+    agentType,
+  });
+  await addAgentToWorkflow(workflow.id, riskMonitor.id);
+
   const rmCtx = await buildSubContext(
     hasRealPermission ? effectivePermContext! : "0xdemo",
     riskMonitor,
   );
   await setDelegation(riskMonitor.id, {
-    parentAgentId:            scout.id,
+    parentAgentId:            analyzer.id,
     delegationContext:        rmCtx.context,
     delegationHash:           rmCtx.hash,
     delegationManagerAddress: effectiveDelegationManager ?? "0x",
     delegationCap:            budget,
   });
 
-  // Risk Monitor → Executor (scoped sub-delegation, capped to budget)
+  // 4. Executor — performs the on-chain action + reports (cron drives this one).
+  const executor = await createAgent({
+    walletAddress,
+    name:        executorName,
+    goal:        executorGoal,
+    budgetUsdc:  budget,
+    scheduleIntervalMs,  // only the Executor runs on schedule; the rest are invoked around it
+    workflowId:  workflow.id,
+    mediaPolicy,
+    position:    { x: 1100, y: centerY },
+    agentType,
+  });
+  await addAgentToWorkflow(workflow.id, executor.id);
+
   const exCtx = await buildSubContext(rmCtx.context, executor);
   await setDelegation(executor.id, {
     parentAgentId:            riskMonitor.id,
@@ -377,10 +509,10 @@ export async function POST(request: NextRequest) {
   });
 
   return NextResponse.json({
-    agents:   [scout, riskMonitor, executor],
+    agents:   [...scouts, analyzer, riskMonitor, executor],
     workflow,
     wired:    true,
-    chain:    `${scout.name} → ${riskMonitor.name} → ${executor.name}`,
+    chain:    `${scouts.length} scouts → ${analyzer.name} → ${riskMonitor.name} → ${executor.name}`,
   });
 }
 

@@ -121,14 +121,21 @@ export interface RelayWorkExecution {
 }
 
 export interface RelayExecutionParams {
-  /** Stored permissionsContext from the user's FunctionCall-scoped grant */
+  /** Stored permissionsContext from the user's ERC-7715 grant */
   userPermissionsContext: string;
   /**
-   * The protocol "work" calls to execute on the user's behalf (e.g. approve +
-   * supply). The relayer fee transfer is prepended automatically. Each target
-   * + method must be allowed by the delegation's AllowedTargets/AllowedMethods.
+   * Recipient of the delegated USDC transfer.
+   * For CloveAutoDeposit: this is the contract address — it receives USDC
+   * and then CLOVE calls forward() to deposit into the protocol.
    */
-  workExecutions: RelayWorkExecution[];
+  recipient:      `0x${string}`;
+  /** USDC amount to transfer to recipient */
+  workAmountUsdc: number;
+  /**
+   * Optional extra calldata executions (currently unused — the erc20-token-periodic
+   * enforcer only allows USDC.transfer so this stays empty).
+   */
+  workExecutions?: RelayWorkExecution[];
   /** Human-readable memo (for debugging) */
   memo?: string;
 }
@@ -163,7 +170,8 @@ export async function executeViaPublicRelayer(
 ): Promise<RelayExecutionResult> {
   const {
     userPermissionsContext,
-    workExecutions,
+    recipient,
+    workAmountUsdc,
     memo = "CLOVE agent execution",
   } = params;
 
@@ -194,17 +202,20 @@ export async function executeViaPublicRelayer(
   }
 
   // ── 3. Build execution bundle ─────────────────────────────────────────────
-  // The FunctionCall-scoped delegation allows USDC.transfer/approve + protocol
-  // methods. Bundle = [fee transfer] + [work calls (approve + supply/deposit/swap)].
+  // Bundle = [fee: USDC.transfer(feeCollector)] + [work: USDC.transfer(recipient)]
+  // The erc20-token-periodic enforcer only allows USDC.transfer() — that's fine
+  // because `recipient` is CloveAutoDeposit contract which does the real deposit.
   const erc20Abi = [
     { name: "transfer", type: "function", inputs: [{ name: "to", type: "address" }, { name: "amount", type: "uint256" }], outputs: [{ type: "bool" }], stateMutability: "nonpayable" },
   ] as const;
 
-  const feeCalldata = encodeFunctionData({ abi: erc20Abi, functionName: "transfer", args: [FEE_COLLECTOR, feeAtoms] });
+  const workAtoms = parseUnits(String(workAmountUsdc), 6);
+  const feeCalldata  = encodeFunctionData({ abi: erc20Abi, functionName: "transfer", args: [FEE_COLLECTOR, feeAtoms]  });
+  const workCalldata = encodeFunctionData({ abi: erc20Abi, functionName: "transfer", args: [recipient,    workAtoms] });
 
   const executions = [
-    { target: USDC, value: "0", data: feeCalldata }, // relayer gas fee in USDC
-    ...workExecutions.map(w => ({ target: w.target, value: w.value ?? "0", data: w.data })),
+    { target: USDC, value: "0", data: feeCalldata  }, // relayer gas fee in USDC
+    { target: USDC, value: "0", data: workCalldata }, // USDC→recipient (contract or user)
   ];
 
   // ── 4. Submit to relayer ──────────────────────────────────────────────────

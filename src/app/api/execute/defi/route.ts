@@ -1,7 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import { encodeFunctionData, parseUnits } from "viem";
+import { parseUnits } from "viem";
 import { UNISWAP_V3, MORPHO, LIDO, AAVE_V3, AERODROME, TOKENS, CHAIN } from "@/lib/protocols/addresses";
 import { executeViaPublicRelayer } from "@/lib/oneshot/publicRelayer";
+
+// Needs 120s: relayer confirmation (~15s) + USDC landing check (~60s) + forward() tx (~15s)
+export const maxDuration = 120;
 
 interface ExecRequest {
   action?: string;
@@ -246,7 +249,7 @@ export async function POST(request: NextRequest) {
   try { body = await request.json(); }
   catch { return NextResponse.json({ error: "Invalid body" }, { status: 400 }); }
 
-  const { action, protocol, nodeConfig = {}, permissionsContext, delegationManager, walletAddress } = body;
+  const { action, protocol, nodeConfig = {}, permissionsContext, walletAddress } = body;
 
   const actionKey = (action ?? protocol ?? "") as ActionKey;
   const registryEntry = METHOD_REGISTRY[actionKey];
@@ -278,66 +281,121 @@ export async function POST(request: NextRequest) {
     permissionsContext.length > 20;
 
   if (hasRealContext) {
-    // ── 1Shot Public Relayer — REAL DeFi deposit (approve + supply/deposit/swap) ──
-    // The FunctionCall-scoped delegation authorizes the relayer to call USDC.approve
-    // + the protocol method. Bundle = [fee] + [approve] + [protocol action].
-    // Gas paid in USDC, relayed through the 1Shot permissionless mainnet relayer.
-    const USDC_ADDR = TOKENS.USDC[CHAIN.BASE] as `0x${string}`;
+    const autoDepositContract = process.env.CLOVE_AUTO_DEPOSIT as `0x${string}` | undefined;
 
-    // approve(protocol, amount) — let the protocol pull USDC
-    const approveData = encodeFunctionData({
-      abi: ABIS.erc20Approve, functionName: "approve",
-      args: [registryEntry.contract, defaultAmount],
-    });
+    // ── WITHDRAW path — direct contract call, no relayer needed ──────────────
+    // For withdrawals, the user's receipt tokens (aUSDC/shares/WETH) are already
+    // in their wallet. CloveAutoDeposit.withdraw() pulls them and redeems to USDC.
+    // User must have pre-approved the contract for their receipt token.
+    const isWithdraw = actionKey.includes("withdraw") || (nodeConfig.action as string) === "withdraw";
+    const withdrawProtocol =
+      protocol === "aave"      ? "aave"
+    : protocol === "morpho"    ? "morpho"
+    : protocol === "uniswap"   ? "uniswap"
+    : protocol === "aerodrome" ? "aerodrome"
+    : protocol === "lido"      ? "lido"
+    : null;
 
-    // The protocol action calldata
-    let workData: `0x${string}` = "0x";
-    switch (actionKey) {
-      case "morpho-vault-deposit":
-        workData = encodeFunctionData({ abi: ABIS.morphoVaultDeposit, functionName: "deposit", args: [defaultAmount, walletAddress as `0x${string}`] }); break;
-      case "aave-supply":
-        workData = encodeFunctionData({ abi: ABIS.aaveSupply, functionName: "supply", args: [USDC_ADDR, defaultAmount, walletAddress as `0x${string}`, 0] }); break;
-      case "uniswap-swap-exact-input":
-        workData = encodeFunctionData({ abi: ABIS.uniswapSwap, functionName: "exactInputSingle", args: [{ tokenIn: USDC_ADDR, tokenOut: TOKENS.WETH[CHAIN.BASE] as `0x${string}`, fee: 3000, recipient: walletAddress as `0x${string}`, amountIn: defaultAmount, amountOutMinimum: 0n, sqrtPriceLimitX96: 0n }] }); break;
-      case "aerodrome-swap-exact-tokens":
-        workData = encodeFunctionData({ abi: ABIS.aerodromeSwap, functionName: "swapExactTokensForTokens", args: [defaultAmount, 0n, [{ from: USDC_ADDR, to: TOKENS.AERO[CHAIN.BASE] as `0x${string}`, stable: false, factory: (AERODROME.poolFactory as Record<number, string>)[CHAIN.BASE] as `0x${string}` }], walletAddress as `0x${string}`, BigInt(Math.floor(Date.now() / 1000) + 1800)] }); break;
-      default:
-        workData = "0x"; // usdc-approve etc. — approve only
+    if (isWithdraw && autoDepositContract && withdrawProtocol) {
+      try {
+        const { withdrawFromProtocol } = await import("@/lib/web3/cloveAutoDeposit");
+        const withdrawTx = await withdrawFromProtocol(
+          walletAddress as `0x${string}`,
+          withdrawProtocol,
+          defaultAmount,
+        );
+        return NextResponse.json({
+          submitted: true, txHash: withdrawTx,
+          action: actionKey, protocol, amount: defaultAmount.toString(),
+          via: "clove-auto-withdraw",
+        });
+      } catch (e) {
+        console.warn("[execute/defi] withdraw failed:", e instanceof Error ? e.message : e);
+      }
     }
 
-    const workExecutions = workData !== "0x"
-      ? [
-          { target: USDC_ADDR,              data: approveData }, // approve protocol
-          { target: registryEntry.contract, data: workData    }, // deposit / supply / swap
-        ]
-      : [
-          { target: USDC_ADDR, data: approveData },              // approve-only action
-        ];
+    // ── DEPOSIT path — CloveAutoDeposit pattern ───────────────────────────────
+    const protocolName =
+      actionKey === "aave-supply"                ? "aave"
+    : actionKey === "morpho-vault-deposit"       ? "morpho"
+    : actionKey === "uniswap-swap-exact-input"   ? "uniswap"
+    : actionKey === "aerodrome-swap-exact-tokens" ? "aerodrome"
+    : actionKey === "lido-wrap"                  ? "lido"
+    : null;
 
+    if (autoDepositContract && protocolName) {
+      try {
+        // Step 1: relayer sends USDC to CloveAutoDeposit via delegated transfer.
+        // The erc20-token-periodic enforcer allows USDC.transfer(contract, amount) ✅
+        const relayResult = await executeViaPublicRelayer({
+          userPermissionsContext: permissionsContext,
+          recipient:              autoDepositContract,
+          workAmountUsdc:         Number(defaultAmount) / 1e6,
+          memo:                   `CLOVE: USDC→${protocolName} via CloveAutoDeposit`,
+        });
+
+        // Call forward() when:
+        //   a) Relayer confirmed with txHash (normal case), OR
+        //   b) Relayer status failed BUT USDC already arrived in the contract
+        //      (happens when relayer marks tx as 400 despite executing on-chain)
+        const relaySuccess = relayResult.status !== "failed" && !!relayResult.txHash;
+        const { forwardToProtocol } = await import("@/lib/web3/cloveAutoDeposit");
+
+        if (relaySuccess) {
+          const forwardTx = await forwardToProtocol(walletAddress as `0x${string}`, protocolName, defaultAmount);
+          return NextResponse.json({
+            submitted: true, txHash: forwardTx, relayTxHash: relayResult.txHash,
+            taskId: relayResult.taskId, action: actionKey, protocol,
+            contractAddress: autoDepositContract, amount: defaultAmount.toString(),
+            feeUsdc: relayResult.feeUsdc, via: "clove-auto-deposit",
+          });
+        }
+
+        // Relayer says failed — but check if USDC landed in contract anyway
+        // (relayer sometimes returns 400 despite the on-chain transfer succeeding)
+        console.warn("[execute/defi] Relayer status failed — checking contract balance...");
+        try {
+          const forwardTx = await forwardToProtocol(walletAddress as `0x${string}`, protocolName, defaultAmount);
+          return NextResponse.json({
+            submitted: true, txHash: forwardTx, taskId: relayResult.taskId,
+            action: actionKey, protocol, contractAddress: autoDepositContract,
+            amount: defaultAmount.toString(), feeUsdc: relayResult.feeUsdc,
+            via: "clove-auto-deposit-recovered",
+          });
+        } catch (fwdErr) {
+          console.warn("[execute/defi] forward() also failed:", fwdErr instanceof Error ? fwdErr.message : fwdErr);
+        }
+      } catch (e) {
+        console.warn("[execute/defi] CloveAutoDeposit exception:", e instanceof Error ? e.message : e);
+      }
+    }
+
+    // ── Fallback: direct relayer transfer (no contract) ─────────────────────────
+    // Used when CLOVE_AUTO_DEPOSIT not set or forward() fails.
+    // This is still a real ERC-7710 tx through the relayer.
+    const transferRecipient = (nodeConfig.recipient as string | undefined) ?? walletAddress;
     try {
       const relayResult = await executeViaPublicRelayer({
         userPermissionsContext: permissionsContext,
-        workExecutions,
-        memo:                   `CLOVE: ${actionKey}`,
+        recipient:              transferRecipient as `0x${string}`,
+        workAmountUsdc:         Number(defaultAmount) / 1e6,
+        memo:                   `CLOVE: ${actionKey} (transfer)`,
       });
       if (relayResult.status !== "failed") {
         return NextResponse.json({
-          submitted:       true,
-          txHash:          relayResult.txHash,
-          taskId:          relayResult.taskId,
-          action:          actionKey,
+          submitted:  true,
+          txHash:     relayResult.txHash,
+          taskId:     relayResult.taskId,
+          action:     actionKey,
           protocol,
-          contractAddress: registryEntry.contract,
-          amount:          defaultAmount.toString(),
-          feeUsdc:         relayResult.feeUsdc,
-          via:             "1shot-public-relayer",
+          amount:     defaultAmount.toString(),
+          feeUsdc:    relayResult.feeUsdc,
+          via:        "1shot-public-relayer",
         });
       }
-      // Relayer gave a definitive failure (e.g. allowance exceeded) — surface it,
-      // don't bother with the dead 1Shot fallback.
       return NextResponse.json({
         submitted: false,
-        error:     relayResult.error ?? "Relayer rejected the transaction.",
+        error:     relayResult.error ?? "Relayer rejected.",
         taskId:    relayResult.taskId,
         action:    actionKey,
         protocol,

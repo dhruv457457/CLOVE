@@ -130,11 +130,22 @@ export async function POST(request: NextRequest) {
         await bumpAgentCounters(agent.id, { status: "executing" });
         send("status", { phase: "executing" });
 
+        // Resolve permissionsContext: body (from dashboard store) → agent DB → undefined
+        // The dashboard store may be empty if the user deleted/cleared the local permission,
+        // but the agent's DB record still has a real delegationContext. Always use the
+        // DB context as authoritative fallback so runs don't silently fail with 400.
+        const resolvedPermCtx =
+          (body.permissionsContext && body.permissionsContext !== "0xdemo" && body.permissionsContext.length > 20)
+            ? body.permissionsContext
+            : (agent.delegationContext && agent.delegationContext !== "0xdemo" && agent.delegationContext.length > 20)
+                ? agent.delegationContext
+                : undefined;
+
         const ctx: ExecutorContext = {
           baseUrl,
           walletAddress:      body.walletAddress      ?? agent.walletAddress,
-          permissionsContext: body.permissionsContext,
-          delegationManager:  body.delegationManager,
+          permissionsContext: resolvedPermCtx,
+          delegationManager:  body.delegationManager  ?? agent.delegationManagerAddress ?? "0x",
           delegationId:       body.delegationId,
           budgetUsdc:         agent.budgetUsdc,
           agentId:            agent.id,
@@ -532,7 +543,8 @@ Once the subgoal is done, output a one-line summary as plain text (no tool call)
   ];
 
   const results: ToolCallResult[] = [];
-  let cx = 600, cy = 100;
+  const cx = 600;
+  let cy = 100;
 
   // 3 iterations is enough for 99% of subgoals (scout → result → done).
   // Was 5 — empirically the 4th and 5th iterations almost always early-exit

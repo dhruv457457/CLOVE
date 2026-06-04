@@ -86,7 +86,7 @@ Return ONLY valid JSON — no prose:
       "id": "schedule",
       "label": "How often should the agent run?",
       "type": "single",
-      "options": ["Every hour", "Every 6 hours", "Daily", "Weekly", "On-demand only"]
+      "options": ["Every minute", "Every 5 minutes", "Every hour", "Every 6 hours", "Daily", "Weekly", "On-demand only"]
     },
     {
       "id": "notify",
@@ -167,7 +167,7 @@ function defaultQuestions(): Question[] {
     },
     {
       id: "schedule", label: "How often should the agent run?", type: "single",
-      options: ["Every hour", "Every 6 hours", "Daily", "On-demand only"],
+      options: ["Every minute", "Every 5 minutes", "Every hour", "Every 6 hours", "Daily", "Weekly", "On-demand only"],
     },
     {
       id: "notify", label: "How should the agent report back?", type: "multi",

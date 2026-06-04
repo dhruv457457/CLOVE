@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import {
   ReactFlow, Background, BackgroundVariant,
   useNodesState, useEdgesState, useReactFlow,
@@ -633,9 +633,11 @@ function HistoryPacketRow({ packet, names }: { packet: AgentHandoffPacket; names
 
 // ── Main page ─────────────────────────────────────────────────────────────────
 export default function WorkflowDetailPage() {
-  const router     = useRouter();
-  const params     = useParams<{ id: string }>();
-  const workflowId = params.id;
+  const router       = useRouter();
+  const params       = useParams<{ id: string }>();
+  const searchParams = useSearchParams();
+  const workflowId   = params.id;
+  const autoRunFired = useRef(false);
 
   const [tab, setTab]         = useState<"canvas" | "timeline" | "history">("canvas");
   const [workflow, setWorkflow] = useState<Workflow | null>(null);
@@ -898,6 +900,20 @@ export default function WorkflowDetailPage() {
       }, 2000);
     }
   }, [live.phase, workflowId, loadWorkflow, loadHistory, loadHandoffs]);
+
+  // Auto-start the orchestrated run when arriving via "Run Team" (?run=1).
+  // Fires once, after agents have loaded, then strips the query param so a
+  // refresh doesn't re-trigger it.
+  useEffect(() => {
+    if (autoRunFired.current) return;
+    if (searchParams.get("run") !== "1") return;
+    if (agents.length === 0) return;
+    if (live.phase !== "idle") return;
+    autoRunFired.current = true;
+    setTab("timeline");
+    runOrchestrated();
+    router.replace(`/dashboard/workflow/${workflowId}`);
+  }, [searchParams, agents, live.phase, runOrchestrated, router, workflowId]);
 
   // Reset live state to allow new run
   const resetLive = () => {

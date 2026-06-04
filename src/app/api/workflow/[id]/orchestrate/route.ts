@@ -50,13 +50,17 @@ async function runAgentPhase(opts: {
   for (let iter = 0; iter < 4; iter++) {
     let res: OpenAI.Chat.ChatCompletion;
     try {
+      const hasTools = opts.tools.length > 0;
       res = await client.chat.completions.create({
-        model:           VENICE_MODELS.reasoning,
+        model:       VENICE_MODELS.reasoning,
         messages,
-        tools:           opts.tools.length > 0 ? opts.tools : undefined,
-        tool_choice:     opts.tools.length > 0 ? "auto" : undefined,
-        temperature:     0.3,
-        response_format: { type: "json_object" },
+        tools:       hasTools ? opts.tools : undefined,
+        tool_choice: hasTools ? "auto" : undefined,
+        temperature: 0.3,
+        // llama-3.3-70b on Venice returns 400 when response_format=json_object is
+        // combined with tools. Only request strict JSON mode for tool-less phases
+        // (e.g. the Risk Monitor's final decision); tool phases emit tool_calls.
+        ...(hasTools ? {} : { response_format: { type: "json_object" as const } }),
       });
     } catch (e) {
       console.warn(`[orchestrate] ${opts.agentName} Venice call failed:`, e);
@@ -221,6 +225,47 @@ function extractIntelligence(
   return null;
 }
 
+// ── Extract whale-convergence intelligence from checkWhaleTrades result ─────────
+// Maps the copy-trade scout output onto the same IntelligencePayload shape the
+// rest of the pipeline consumes, so the Risk/Executor phases stay generic.
+function extractWhaleIntelligence(
+  toolResults: Array<{ tool: string; result: string; cost?: number }>,
+): IntelligencePayload | null {
+  for (const r of toolResults) {
+    if (r.tool !== "checkWhaleTrades") continue;
+    try {
+      const d = JSON.parse(r.result) as {
+        tradeCount?: number;
+        trades?: Array<{ wallet: string; action: string; symbol?: string; ageMinutes: number }>;
+        convergence?: Array<{ target: string; walletCount: number }>;
+      };
+      const trades = d.trades ?? [];
+      // Strongest convergence = most whales on the same token.
+      const top = (d.convergence ?? []).sort((a, b) => b.walletCount - a.walletCount)[0];
+      const recommended = top?.target ?? "hold";
+      const reason = top
+        ? `${top.walletCount} whales converged on ${top.target}.`
+        : trades.length > 0
+          ? `Whale activity seen (${trades.length} trades) but no 2+ wallet convergence.`
+          : "No recent whale activity — nothing to copy.";
+      const tradesSummary = trades
+        .slice(0, 8)
+        .map(t => `${t.wallet.slice(0, 6)}… ${t.action} ${t.symbol ?? "?"} (${t.ageMinutes}m ago)`)
+        .join("; ");
+      return {
+        bestApy:     0,
+        recommended,
+        reason,
+        yields:      {},
+        marketNews:  tradesSummary || undefined,
+        x402Cost:    r.cost ?? 0,
+        fetchedAt:   Date.now(),
+      };
+    } catch { /**/ }
+  }
+  return null;
+}
+
 // ── Extract decision from Risk Monitor's response ──────────────────────────────
 
 function extractDecision(
@@ -278,7 +323,7 @@ function extractExecution(
   decision: DecisionPayload,
 ): ExecutionPayload {
   for (const r of toolResults) {
-    if (r.tool === "executeDefi") {
+    if (r.tool === "executeDefi" || r.tool === "executeCopyTrade") {
       try {
         const d = JSON.parse(r.result) as {
           submitted?: boolean; prepared?: boolean; txHash?: string;
@@ -318,15 +363,55 @@ export async function POST(
     return Response.json({ error: "Workflow needs at least 3 agents (Scout, Risk, Executor)" }, { status: 400 });
   }
 
-  // Load agents
-  const [scout, riskMonitor, executor] = await Promise.all([
-    getAgent(wf.agentIds[0]),
-    getAgent(wf.agentIds[1]),
-    getAgent(wf.agentIds[2]),
-  ]);
+  // Load every agent in the workflow, then resolve roles BY NAME so this works
+  // for both the legacy 3-agent team and the new per-protocol fan-out
+  // (5 scouts + Convergence Analyzer + Risk Monitor + Executor).
+  const allAgents = (await Promise.all(wf.agentIds.map(getAgent))).filter(
+    (a): a is NonNullable<typeof a> => !!a,
+  );
+  const nameMatch = (a: { name: string }, re: RegExp) => re.test(a.name);
+
+  // Executor: the scheduled spender (name "…Executor" or has a schedule interval).
+  const executor =
+    allAgents.find(a => nameMatch(a, /executor/i)) ??
+    allAgents.find(a => !!a.scheduleIntervalMs) ??
+    allAgents[allAgents.length - 1];
+
+  // Risk Monitor: the risk/guard/monitor gate.
+  const riskMonitor =
+    allAgents.find(a => nameMatch(a, /risk|monitor|guard|safety/i) && a.id !== executor.id) ??
+    allAgents[allAgents.length - 2];
+
+  // Scout/intelligence role: prefer the Convergence Analyzer (it aggregates all
+  // protocols); else the first Scout. The scout phase calls checkYields across
+  // every protocol in one shot, so a single representative covers the fan-out.
+  const scout =
+    allAgents.find(a => nameMatch(a, /analyzer|convergence/i)) ??
+    allAgents.find(a => nameMatch(a, /scout/i)) ??
+    allAgents.find(a => a.id !== executor.id && a.id !== riskMonitor.id) ??
+    allAgents[0];
+
   if (!scout || !riskMonitor || !executor) {
-    return Response.json({ error: "Could not load all agents" }, { status: 400 });
+    return Response.json({ error: "Could not resolve Scout / Risk / Executor roles" }, { status: 400 });
   }
+
+  // Team kind drives which tools each phase uses (yield vs. copy-trade).
+  const teamKind: "copy-trader" | "yield" =
+    executor.agentType === "copy-trader" ||
+    /copy|whale/i.test(`${executor.name} ${scout.name} ${wf.prompt}`)
+      ? "copy-trader"
+      : "yield";
+
+  // For copy-trade teams, gather the tracked whale wallets from the scout goals
+  // (each scout's goal embeds the full address it tracks) or the workflow prompt.
+  const teamWallets = [
+    ...new Set(
+      allAgents
+        .flatMap(a => a.goal.match(/0x[a-fA-F0-9]{40}/g) ?? [])
+        .concat(wf.prompt.match(/0x[a-fA-F0-9]{40}/g) ?? [])
+        .map(w => w.toLowerCase()),
+    ),
+  ];
 
   const runId = generateRunId();
   const walletAddress = wf.walletAddress;
@@ -378,18 +463,34 @@ export async function POST(
           budgetUsdc:     scout.budgetUsdc,
           agentId:        scout.id,
           budgetUsedUsdc: scout.budgetUsedUsdc ?? 0,
+          // Copy-trade scouts need the tracked wallet list for checkWhaleTrades.
+          ...(teamKind === "copy-trader" ? { typeConfig: { wallets: teamWallets } } : {}),
         };
 
-        const scoutTools = TOOL_DEFS.filter(t => ["checkYields"].includes((t as { function?: { name?: string } }).function?.name ?? ""));
+        const scoutToolName = teamKind === "copy-trader" ? "checkWhaleTrades" : "checkYields";
+        const scoutTools = TOOL_DEFS.filter(t => [scoutToolName].includes((t as { function?: { name?: string } }).function?.name ?? ""));
+
+        const scoutPhasePrompt = teamKind === "copy-trader"
+          ? {
+              systemPrompt: `You are ${scout.name}, a smart-money intelligence agent.
+Your ONLY job in this run: call checkWhaleTrades to fetch recent on-chain trades for the tracked whale wallets.
+Do NOT execute any transactions. Do NOT call checkRisk. Just fetch and report.
+After checkWhaleTrades returns, stop — do not call any more tools.`,
+              userMessage: `Fetch recent whale trades for these wallets: ${teamWallets.join(", ") || "(from config)"}. Call checkWhaleTrades now.`,
+            }
+          : {
+              systemPrompt: `You are ${scout.name}, an autonomous DeFi intelligence agent.
+Your ONLY job in this run: call checkYields to fetch live APY data from Base DeFi protocols.
+Do NOT execute any transactions. Do NOT call checkRisk. Just fetch and report.
+After checkYields returns, stop — do not call any more tools.`,
+              userMessage: `Fetch live DeFi yields for ${wf.prompt}. Call checkYields now.`,
+            };
 
         const { toolResults: scoutResults } = await runAgentPhase({
           agentName:    scout.name,
           agentRole:    "scout",
-          systemPrompt: `You are ${scout.name}, an autonomous DeFi intelligence agent.
-Your ONLY job in this run: call checkYields to fetch live APY data from Base DeFi protocols.
-Do NOT execute any transactions. Do NOT call checkRisk. Just fetch and report.
-After checkYields returns, stop — do not call any more tools.`,
-          userMessage:  `Fetch live DeFi yields for ${wf.prompt}. Call checkYields now.`,
+          systemPrompt: scoutPhasePrompt.systemPrompt,
+          userMessage:  scoutPhasePrompt.userMessage,
           tools:        scoutTools,
           ctx:          scoutCtx,
           send,
@@ -397,10 +498,16 @@ After checkYields returns, stop — do not call any more tools.`,
           agentId:      scout.id,
         });
 
-        const intelligence = extractIntelligence(scoutResults);
+        const intelligence = teamKind === "copy-trader"
+          ? extractWhaleIntelligence(scoutResults)
+          : extractIntelligence(scoutResults);
 
         if (!intelligence) {
-          throw new Error("Scout failed to fetch intelligence");
+          throw new Error(
+            teamKind === "copy-trader"
+              ? "Scout failed to fetch whale activity"
+              : "Scout failed to fetch intelligence",
+          );
         }
 
         await updateHandoffPacket(packet.id, { intelligence, phase: "redelegating-risk" });
@@ -466,14 +573,17 @@ After checkYields returns, stop — do not call any more tools.`,
 
         const riskTools = TOOL_DEFS.filter(t => ["checkRisk"].includes((t as { function?: { name?: string } }).function?.name ?? ""));
 
-        const { toolResults: riskResults, finalText: riskFinalText } = await runAgentPhase({
-          agentName:    riskMonitor.name,
-          agentRole:    "risk",
-          systemPrompt: `You are ${riskMonitor.name}, a DeFi risk evaluation agent.
-Scout has already fetched live intelligence — do NOT call checkYields again.
-Use checkRisk if needed to validate current market conditions.
-Then output a JSON decision: { action, protocol, amount, confidence, reasoning, approved, riskLevel }`,
-          userMessage: `Scout's intelligence (already paid via x402):
+        const riskUserMessage = teamKind === "copy-trader"
+          ? `Convergence Detector signal:
+${intelligence.reason}
+Converged token: ${intelligence.recommended}
+Whale activity: ${intelligence.marketNews ?? "see scout report"}
+
+Goal: ${wf.prompt}
+
+Decide whether to MIRROR this trade. Approve ONLY if the token has healthy liquidity, is not an obvious scam/honeypot, and the convergence is genuine (2+ independent whales). If nothing converged, action must be "hold".
+Return JSON: { "action": "deposit"|"hold", "protocol": "uniswap"|"aerodrome", "amount": "0.5", "confidence": 0.8, "reasoning": "...", "approved": true, "riskLevel": "LOW" }`
+          : `Scout's intelligence (already paid via x402):
 Best APY: ${intelligence.bestApy}% on ${intelligence.recommended}
 Scout's reason: ${intelligence.reason}
 
@@ -485,7 +595,16 @@ Market news: ${intelligence.marketNews ?? "No additional news"}
 Goal: ${wf.prompt}
 
 Evaluate this data. Is it safe to ${intelligence.recommended === "hold" ? "hold" : `deposit into ${intelligence.recommended}`}?
-Return JSON: { "action": "deposit"|"hold"|"rebalance", "protocol": "...", "amount": "5", "confidence": 0.87, "reasoning": "...", "approved": true, "riskLevel": "LOW" }`,
+Return JSON: { "action": "deposit"|"hold"|"rebalance", "protocol": "...", "amount": "5", "confidence": 0.87, "reasoning": "...", "approved": true, "riskLevel": "LOW" }`;
+
+        const { toolResults: riskResults, finalText: riskFinalText } = await runAgentPhase({
+          agentName:    riskMonitor.name,
+          agentRole:    "risk",
+          systemPrompt: `You are ${riskMonitor.name}, a risk evaluation agent.
+Scout has already fetched live intelligence — do NOT re-fetch it.
+Use checkRisk if needed to validate current market conditions.
+Then output a JSON decision: { action, protocol, amount, confidence, reasoning, approved, riskLevel }`,
+          userMessage: riskUserMessage,
           tools:   riskTools,
           ctx:     riskCtx,
           send,
@@ -551,16 +670,32 @@ Return JSON: { "action": "deposit"|"hold"|"rebalance", "protocol": "...", "amoun
           budgetUsedUsdc: executor.budgetUsedUsdc ?? 0,
         };
 
-        const execTools = TOOL_DEFS.filter(t => ["executeDefi", "notifyUser"].includes((t as { function?: { name?: string } }).function?.name ?? ""));
+        const execToolName = teamKind === "copy-trader" ? "executeCopyTrade" : "executeDefi";
+        const execTools = TOOL_DEFS.filter(t => [execToolName, "notifyUser"].includes((t as { function?: { name?: string } }).function?.name ?? ""));
 
-        const { toolResults: execResults } = await runAgentPhase({
-          agentName:    executor.name,
-          agentRole:    "executor",
-          systemPrompt: `You are ${executor.name}, a DeFi execution agent.
+        const execPhasePrompt = teamKind === "copy-trader"
+          ? {
+              systemPrompt: `You are ${executor.name}, a copy-trade execution agent.
+Risk Monitor has approved mirroring a whale trade — execute it EXACTLY as specified.
+Do NOT re-evaluate risk. Just execute the swap.
+After executeCopyTrade completes, call notifyUser to send a Telegram report.`,
+              userMessage: `Risk Monitor approved mirroring this whale trade:
+Token to buy: ${intelligence.recommended}
+Swap venue: ${decision.protocol ?? "uniswap"}
+Amount: ${decision.amount ?? "0.5"} USDC
+Reasoning: ${decision.reasoning}
+Confidence: ${Math.round(decision.confidence * 100)}%
+
+Signal basis: ${intelligence.reason}
+
+Call executeCopyTrade now with protocol="${decision.protocol ?? "uniswap"}", tokenSymbol="${intelligence.recommended}", amount="${decision.amount ?? "0.5"}". Then notify the user.`,
+            }
+          : {
+              systemPrompt: `You are ${executor.name}, a DeFi execution agent.
 Risk Monitor has approved a specific action — execute it EXACTLY as specified.
 Do NOT re-evaluate risk. Do NOT check yields again. Just execute.
 After executeDefi completes, call notifyUser to send a Telegram report.`,
-          userMessage: `Risk Monitor approved this action:
+              userMessage: `Risk Monitor approved this action:
 Action: ${decision.action}
 Protocol: ${decision.protocol ?? intelligence.recommended}
 Amount: ${decision.amount ?? "5"} USDC
@@ -570,6 +705,13 @@ Confidence: ${Math.round(decision.confidence * 100)}%
 Intelligence basis: Scout found ${intelligence.bestApy}% APY on ${intelligence.recommended}.
 
 Execute via executeDefi now. Then notify the user.`,
+            };
+
+        const { toolResults: execResults } = await runAgentPhase({
+          agentName:    executor.name,
+          agentRole:    "executor",
+          systemPrompt: execPhasePrompt.systemPrompt,
+          userMessage:  execPhasePrompt.userMessage,
           tools:   execTools,
           ctx:     execCtx,
           send,
@@ -647,4 +789,6 @@ const TOOL_DEFS: OpenAI.Chat.ChatCompletionTool[] = [
   { type: "function", function: { name: "checkRisk",    description: "Classify market risk (LOW/MEDIUM/HIGH) using web search.",                    parameters: { type: "object", required: ["context"], properties: { context: { type: "string" } } } } },
   { type: "function", function: { name: "executeDefi",  description: "Deposit/swap/stake on a DeFi protocol using ERC-7715 delegation via 1Shot.", parameters: { type: "object", required: ["protocol","amount","reasoning"], properties: { protocol: { type: "string", enum: ["morpho","uniswap","aerodrome","lido","aave"] }, action: { type: "string", enum: ["deposit","swap","stake","supply","lp"] }, amount: { type: "string" }, reasoning: { type: "string" } } } } },
   { type: "function", function: { name: "notifyUser",   description: "Send a Telegram update. ALWAYS the last tool call.",                          parameters: { type: "object", required: ["message"], properties: { message: { type: "string" } } } } },
+  { type: "function", function: { name: "checkWhaleTrades", description: "Fetch recent on-chain trades for tracked whale wallets + convergence signals.", parameters: { type: "object", properties: { wallets: { type: "array", items: { type: "string" } }, hours: { type: "number" } } } } },
+  { type: "function", function: { name: "executeCopyTrade", description: "Mirror a whale's trade by swapping into a token via ERC-7715 delegation.", parameters: { type: "object", required: ["protocol","amount","tokenSymbol","reasoning"], properties: { protocol: { type: "string", enum: ["uniswap","aerodrome"] }, tokenSymbol: { type: "string" }, amount: { type: "string" }, reasoning: { type: "string" } } } } },
 ];

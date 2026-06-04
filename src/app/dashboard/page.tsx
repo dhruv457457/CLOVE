@@ -54,6 +54,7 @@ interface Agent {
   totalRuns:             number;
   position?:             { x: number; y: number };
   parentAgentId?:        string | null;
+  workflowId?:           string | null;
   delegationStatus?:     "active" | "revoked" | "pending" | "none";
   delegationCap?:        string;
   delegationContext?:    string | null;
@@ -523,6 +524,9 @@ export default function DashboardPage() {
   const [scanOpen,      setScanOpen]      = useState(false);
   const [scanning,      setScanning]      = useState(false);
 
+  // One-click team run (orchestrate the whole workflow from the canvas)
+  const [teamRunning,   setTeamRunning]   = useState(false);
+
   // Fix 3A: floating prompt bar
   const [nlPrompt,     setNlPrompt]     = useState("");
   const [nlSubmitting, setNlSubmitting] = useState(false);
@@ -764,6 +768,22 @@ const loadAgents = useCallback(async () => {
     }
   }, [agents]);
 
+  // One-click "Run Team": jump to the workflow's live A2A view and auto-start
+  // the orchestrated run (Scouts → Analyzer → Risk → Executor). The workflow
+  // page renders the real-time timeline, agent thoughts, decision, and the
+  // on-chain tx / Basescan link as events stream in.
+  const runTeam = useCallback(() => {
+    // Pick the workflow with the most agents (the active team).
+    const counts = new Map<string, number>();
+    for (const a of agents) {
+      if (a.workflowId) counts.set(a.workflowId, (counts.get(a.workflowId) ?? 0) + 1);
+    }
+    const target = [...counts.entries()].sort((x, y) => y[1] - x[1])[0]?.[0];
+    if (!target) { toast("No multi-agent workflow found to run.", "info"); return; }
+    setTeamRunning(true);
+    router.push(`/dashboard/workflow/${target}?run=1`);
+  }, [agents, router, toast]);
+
   // Fix: NL prompt now opens questionnaire first (Claude Design style)
   const submitNlPrompt = useCallback(async () => {
     const wallet = metamaskStore.getState().userAddress;
@@ -959,6 +979,24 @@ const loadAgents = useCallback(async () => {
         <span style={{ fontSize: 13, fontWeight: 500, color: TEXT }}>Agents</span>
         <span style={{ fontSize: 11, color: MID, letterSpacing: "0.06em" }}>· {agents.length} active</span>
         <div style={{ flex: 1 }} />
+
+        {/* One-click team run */}
+        <button
+          onClick={runTeam}
+          disabled={teamRunning}
+          title="Run the whole workflow once: Scouts → Analyzer → Risk → Executor"
+          style={{
+            display: "inline-flex", alignItems: "center", gap: 6,
+            padding: "5px 12px", borderRadius: 6,
+            background: "rgba(200,255,61,0.1)",
+            border: `1px solid rgba(200,255,61,0.3)`,
+            color: ACCENT,
+            fontSize: 11.5, cursor: teamRunning ? "not-allowed" : "pointer",
+            opacity: teamRunning ? 0.6 : 1, fontWeight: 500, letterSpacing: "0.02em",
+          }}
+        >
+          {teamRunning ? "▶ Running…" : "▶ Run Team"}
+        </button>
 
         {/* Fix 4: Scan button */}
         <button
@@ -2362,6 +2400,9 @@ function PermGrantModal({ onClose, onGranted }: { onClose: () => void; onGranted
   const [revoking,  setRevoking]  = useState(false);
   const [done,      setDone]      = useState(false);
   const [tick,      setTick]      = useState(0);
+  // Withdrawal setup state
+  const [setupStatus, setSetupStatus] = useState<import("@/lib/web3/setupWithdrawals").ApprovalStatus>("idle");
+  const [setupDone,   setSetupDone]   = useState(false);
 
   // Re-read permission state reactively
   useEffect(() => {
@@ -2503,6 +2544,56 @@ function PermGrantModal({ onClose, onGranted }: { onClose: () => void; onGranted
         >
           {done ? "✅ Permission granted!" : granting ? "Waiting for MetaMask…" : hasExisting ? "Re-grant via MetaMask →" : "Grant via MetaMask →"}
         </button>
+
+        {/* ── Set up withdrawals ── */}
+        <div style={{ borderTop: `1px solid ${LINE}`, paddingTop: 16 }}>
+          <div style={{ fontSize: 11.5, color: MID, marginBottom: 10, lineHeight: 1.6 }}>
+            <strong style={{ color: TEXT2 }}>Enable autonomous withdrawals</strong>
+            {" "}— approve the CLOVE contract once to let agents automatically exit positions.
+            Covers all 5 protocols: Aave, Morpho, Uniswap, Aerodrome, Lido.
+          </div>
+
+          {!setupDone ? (
+            <button
+              onClick={async () => {
+                const { setupWithdrawals } = await import("@/lib/web3/setupWithdrawals");
+                const mm = metamaskStore.getState();
+                if (!mm.userAddress) { alert("Connect MetaMask first"); return; }
+                try {
+                  await setupWithdrawals(mm.userAddress as `0x${string}`, (s) => {
+                    setSetupStatus(s);
+                    if (s === "done") setSetupDone(true);
+                  });
+                } catch (e) {
+                  setSetupStatus({ error: e instanceof Error ? e.message : String(e) });
+                }
+              }}
+              disabled={setupStatus === "pending"}
+              style={{
+                width: "100%", padding: "10px 14px", borderRadius: 9,
+                background: "rgba(200,255,61,0.07)",
+                border: `1px solid rgba(200,255,61,0.3)`,
+                color: ACCENT, fontWeight: 600, fontSize: 13,
+                cursor: setupStatus === "pending" ? "wait" : "pointer",
+                display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+              }}
+            >
+              {setupStatus === "pending"
+                ? "⏳ Waiting for MetaMask… (1 transaction)"
+                : typeof setupStatus === "object" && "error" in setupStatus
+                  ? `⚠ ${setupStatus.error.slice(0, 50)}`
+                  : "🔓 Set up withdrawals — 1 click, 5 protocols"}
+            </button>
+          ) : (
+            <div style={{ padding: "10px 14px", borderRadius: 9, background: "rgba(200,255,61,0.07)", border: `1px solid rgba(200,255,61,0.2)`, fontSize: 12.5, color: ACCENT, textAlign: "center" }}>
+              ✅ Withdrawals enabled — all 5 protocols approved
+            </div>
+          )}
+
+          <div style={{ marginTop: 8, fontSize: 10.5, color: MID, lineHeight: 1.5 }}>
+            Each approval is a standard MetaMask transaction (no ETH cost on Base L2 — gas is ~$0.001 total).
+          </div>
+        </div>
       </div>
     </div>
   );
