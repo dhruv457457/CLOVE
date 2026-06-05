@@ -232,10 +232,11 @@ function extractWhaleIntelligence(
   toolResults: Array<{ tool: string; result: string; cost?: number }>,
 ): IntelligencePayload | null {
   for (const r of toolResults) {
-    if (r.tool !== "checkWhaleTrades") continue;
+    if (r.tool !== "checkWhaleTrades" && r.tool !== "discoverWhales") continue;
     try {
       const d = JSON.parse(r.result) as {
         tradeCount?: number;
+        wallets?: string[];
         trades?: Array<{ wallet: string; action: string; symbol?: string; ageMinutes: number }>;
         convergence?: Array<{ target: string; walletCount: number }>;
       };
@@ -467,10 +468,23 @@ export async function POST(
           ...(teamKind === "copy-trader" ? { typeConfig: { wallets: teamWallets } } : {}),
         };
 
-        const scoutToolName = teamKind === "copy-trader" ? "checkWhaleTrades" : "checkYields";
+        // Copy-trade teams: use checkWhaleTrades when wallets are supplied,
+        // otherwise discoverWhales (the team finds its own smart money).
+        const copyDiscovery = teamKind === "copy-trader" && teamWallets.length === 0;
+        const scoutToolName = teamKind !== "copy-trader" ? "checkYields"
+          : copyDiscovery ? "discoverWhales"
+          : "checkWhaleTrades";
         const scoutTools = TOOL_DEFS.filter(t => [scoutToolName].includes((t as { function?: { name?: string } }).function?.name ?? ""));
 
-        const scoutPhasePrompt = teamKind === "copy-trader"
+        const scoutPhasePrompt = copyDiscovery
+          ? {
+              systemPrompt: `You are ${scout.name}, an autonomous smart-money discovery agent.
+Your ONLY job in this run: call discoverWhales to find the most active high-value traders on Base, along with their recent trades and convergence.
+Do NOT execute any transactions. Do NOT call checkRisk. Just discover and report.
+After discoverWhales returns, stop — do not call any more tools.`,
+              userMessage: `Discover the top smart-money wallets on Base right now and their convergence. Call discoverWhales now.`,
+            }
+          : teamKind === "copy-trader"
           ? {
               systemPrompt: `You are ${scout.name}, a smart-money intelligence agent.
 Your ONLY job in this run: call checkWhaleTrades to fetch recent on-chain trades for the tracked whale wallets.
@@ -789,6 +803,7 @@ const TOOL_DEFS: OpenAI.Chat.ChatCompletionTool[] = [
   { type: "function", function: { name: "checkRisk",    description: "Classify market risk (LOW/MEDIUM/HIGH) using web search.",                    parameters: { type: "object", required: ["context"], properties: { context: { type: "string" } } } } },
   { type: "function", function: { name: "executeDefi",  description: "Deposit/swap/stake on a DeFi protocol using ERC-7715 delegation via 1Shot.", parameters: { type: "object", required: ["protocol","amount","reasoning"], properties: { protocol: { type: "string", enum: ["morpho","uniswap","aerodrome","lido","aave"] }, action: { type: "string", enum: ["deposit","swap","stake","supply","lp"] }, amount: { type: "string" }, reasoning: { type: "string" } } } } },
   { type: "function", function: { name: "notifyUser",   description: "Send a Telegram update. ALWAYS the last tool call.",                          parameters: { type: "object", required: ["message"], properties: { message: { type: "string" } } } } },
+  { type: "function", function: { name: "discoverWhales", description: "Autonomously find top smart-money wallets on Base + their recent trades and convergence.", parameters: { type: "object", properties: { limit: { type: "number" }, hours: { type: "number" } } } } },
   { type: "function", function: { name: "checkWhaleTrades", description: "Fetch recent on-chain trades for tracked whale wallets + convergence signals.", parameters: { type: "object", properties: { wallets: { type: "array", items: { type: "string" } }, hours: { type: "number" } } } } },
   { type: "function", function: { name: "executeCopyTrade", description: "Mirror a whale's trade by swapping into a token via ERC-7715 delegation.", parameters: { type: "object", required: ["protocol","amount","tokenSymbol","reasoning"], properties: { protocol: { type: "string", enum: ["uniswap","aerodrome"] }, tokenSymbol: { type: "string" }, amount: { type: "string" }, reasoning: { type: "string" } } } } },
 ];

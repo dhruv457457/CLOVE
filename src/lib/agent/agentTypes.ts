@@ -101,7 +101,8 @@ Pass on markets where your estimate matches the crowd. Most markets are efficien
     tagline:     "Mirrors smart-money wallets when they move together",
     chainId:     CHAIN.BASE,
     chainName:   "Base",
-    tools:       ["checkWhaleTrades", "checkRisk", "executeCopyTrade", "notifyUser", "addThought"],
+    // discoverWhales: autonomously finds smart-money wallets when none are configured
+    tools:       ["discoverWhales", "checkWhaleTrades", "checkRisk", "executeCopyTrade", "notifyUser", "addThought"],
     dataSources: ["Basescan tx API", "Uniswap V3 subgraph", "Venice web search"],
     defaultBudget: "25",
     defaultIntervalMs: HOUR,

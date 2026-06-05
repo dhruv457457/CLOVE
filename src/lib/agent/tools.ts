@@ -1,4 +1,4 @@
-﻿import "server-only";
+import "server-only";
 import OpenAI from "openai";
 
 /**
@@ -156,6 +156,21 @@ export const TOOL_DEFINITIONS: OpenAI.Chat.ChatCompletionTool[] = [
   },
 
   // â”€â”€ Copy-trader tools (Base) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  {
+    type: "function",
+    function: {
+      name: "discoverWhales",
+      description:
+        "Autonomously find candidate smart-money wallets by scanning recent Base DEX router flow (most active high-value swappers). Returns ranked wallets PLUS their recent trades and convergence. Use when no wallets were supplied.",
+      parameters: {
+        type: "object",
+        properties: {
+          limit: { type: "number", description: "How many top wallets to discover (default 5)" },
+          hours: { type: "number", description: "Lookback window in hours (default 24)" },
+        },
+      },
+    },
+  },
   {
     type: "function",
     function: {
@@ -799,6 +814,36 @@ Return ONLY JSON: { "riskLevel": "LOW"|"MEDIUM"|"HIGH", "safeToExecute": true|fa
   }
 
   // â”€â”€ checkWhaleTrades â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── discoverWhales ──────────────────────────────────────────────────────────
+  if (name === "discoverWhales") {
+    try {
+      const limit = Number(args.limit ?? 5);
+      const hours = Number(args.hours ?? 24);
+      const res = await fetch(`${ctx.baseUrl}/api/whale/discover?limit=${limit}&hours=${hours}`, {
+        signal: AbortSignal.timeout(30000),
+      });
+      const data = await res.json() as {
+        wallets?: string[];
+        discovered?: Array<{ wallet: string; swaps: number; ethMoved: number; lastSeenMinutes: number }>;
+        trades?: unknown[];
+        convergence?: Array<{ target: string; walletCount: number }>;
+        note?: string;
+      };
+      return { tool: name, args, result: JSON.stringify({
+        discoveredCount: data.wallets?.length ?? 0,
+        wallets:         data.wallets ?? [],
+        discovered:      data.discovered ?? [],
+        tradeCount:      data.trades?.length ?? 0,
+        trades:          (data.trades ?? []).slice(0, 15),
+        convergence:     data.convergence ?? [],
+        source:          "basescan",
+        note:            data.note,
+      })};
+    } catch (e) {
+      return { tool: name, args, result: JSON.stringify({ error: String(e), wallets: [], trades: [], convergence: [] }) };
+    }
+  }
+
   if (name === "checkWhaleTrades") {
     try {
       const cfgWallets = Array.isArray(ctx.typeConfig?.wallets) ? (ctx.typeConfig!.wallets as string[]) : [];
@@ -830,26 +875,55 @@ Return ONLY JSON: { "riskLevel": "LOW"|"MEDIUM"|"HIGH", "safeToExecute": true|fa
   }
 
   // â”€â”€ executeCopyTrade (thin wrapper over executeDefi swap) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── executeCopyTrade ────────────────────────────────────────────────────────
   if (name === "executeCopyTrade") {
-    const protocol = String(args.protocol ?? "uniswap");
-    const amount   = String(args.amount ?? "0.1");
+    const protocol    = String(args.protocol ?? "uniswap");
+    const amount      = String(args.amount ?? "0.1");
+    const tokenSymbol = String(args.tokenSymbol ?? "");
+    // BUG 1+6 fix: map well-known Base token symbols to contract addresses.
+    // Without this, every copy trade swaps USDC→WETH regardless of what the whale bought.
+    const TOKEN_ADDRESSES: Record<string, string> = {
+      WETH:   "0x4200000000000000000000000000000000000006",
+      ETH:    "0x4200000000000000000000000000000000000006",
+      AERO:   "0x940181a94A35A4569E4529A3CDfB74e38FD98631",
+      cbETH:  "0x2Ae3F1Ec7F1F5012CFEab0185bfc7aa3cf0DEc22",
+      cbBTC:  "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf",
+      DEGEN:  "0x4ed4E862860beD51a9570b96d89aF5E1B0Efefed",
+      BRETT:  "0x532f27101965dd16442E59d40670FaF5eBB142E4",
+      HIGHER: "0x0578d8A44db98B23BF096A382e016e29a5Ce0ffe",
+      USDT:   "0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2",
+      DAI:    "0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb",
+    };
+    const tokenOut = tokenSymbol ? (TOKEN_ADDRESSES[tokenSymbol.toUpperCase()] ?? null) : null;
+    if (!tokenOut) {
+      return {
+        tool: name, args, cost: 0,
+        result: JSON.stringify({
+          blocked: true,
+          reason: tokenSymbol
+            ? ("Token " + tokenSymbol + " not in registry. Supported: " + Object.keys(TOKEN_ADDRESSES).join(", "))
+            : "No tokenSymbol provided — specify which token the whale bought (from checkWhaleTrades results)",
+        }),
+      };
+    }
     const amountNum = Number.parseFloat(amount) || 0;
     const budgetNum = Number.parseFloat(ctx.budgetUsdc) || 0;
     const used      = ctx.budgetUsedUsdc ?? 0;
     if (budgetNum > 0 && (used + amountNum) > budgetNum * 0.95) {
       return {
         tool: name, args, cost: 0,
-        result: JSON.stringify({ blocked: true, reason: "Budget guard â€” copy trade would exceed 95% of cap", budgetUsdc: budgetNum, usedUsdc: used, requested: amountNum }),
+        result: JSON.stringify({ blocked: true, reason: "Budget guard — copy trade would exceed 95% of cap", budgetUsdc: budgetNum, usedUsdc: used, requested: amountNum }),
       };
     }
     try {
+      const action = protocol === "aerodrome" ? "aerodrome-swap-exact-tokens" : "uniswap-swap-exact-input";
       const res = await fetch(`${ctx.baseUrl}/api/execute/defi`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          action:             protocol === "aerodrome" ? "aerodrome-swap-exact-tokens" : "uniswap-swap-exact-input",
+          action,
           protocol,
-          nodeConfig:         { amount, platform: protocol, action: "swap", tokenSymbol: args.tokenSymbol },
+          nodeConfig:         { amount, platform: protocol, action: "swap", tokenSymbol, tokenOut },
           permissionsContext: ctx.permissionsContext,
           delegationManager:  ctx.delegationManager  ?? "0x",
           delegationId:       ctx.delegationId,
@@ -860,14 +934,7 @@ Return ONLY JSON: { "riskLevel": "LOW"|"MEDIUM"|"HIGH", "safeToExecute": true|fa
       const data = await res.json() as { submitted?: boolean; prepared?: boolean; txHash?: string; via?: string };
       return {
         tool: name, args, txHash: data.txHash, cost: 0,
-        result: JSON.stringify({
-          reasoning:   args.reasoning,
-          tokenSymbol: args.tokenSymbol,
-          submitted:   data.submitted,
-          prepared:    data.prepared,
-          txHash:      data.txHash,
-          via:         data.via,
-        }),
+        result: JSON.stringify({ reasoning: args.reasoning, tokenSymbol, tokenOut, submitted: data.submitted, prepared: data.prepared, txHash: data.txHash, via: data.via }),
       };
     } catch (e) {
       return { tool: name, args, result: JSON.stringify({ error: String(e) }) };
@@ -958,4 +1025,3 @@ Return ONLY JSON: { "signals": [ { "token": "...", "theme": "...", "mentionTrend
 
   return { tool: name, args, result: JSON.stringify({ error: `Unknown tool: ${name}` }) };
 }
-

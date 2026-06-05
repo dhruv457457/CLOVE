@@ -122,13 +122,16 @@ const METHOD_REGISTRY = {
   "uniswap-swap-exact-input": {
     methodIdEnv: "ONESHOT_METHOD_UNISWAP_SWAP_EXACT_INPUT",
     contract: (UNISWAP_V3.swapRouter as Record<number, string>)[CHAIN.BASE] as `0x${string}`,
-    buildParams: (amount: bigint, recipient: `0x${string}`) => ({
+    // BUG 1 fix: tokenOut is now dynamic — passed via nodeConfig.tokenOut from executeCopyTrade.
+    // Falls back to WETH for the default yield/lido flow.
+    buildParams: (amount: bigint, recipient: `0x${string}`, nodeConfig?: Record<string, unknown>) => ({
       params: {
-        tokenIn: TOKENS.USDC[CHAIN.BASE],
-        tokenOut: TOKENS.WETH[CHAIN.BASE],
-        fee: 3000, recipient,
-        amountIn: amount.toString(),
-        amountOutMinimum: "0",
+        tokenIn:           TOKENS.USDC[CHAIN.BASE],
+        tokenOut:          (nodeConfig?.tokenOut as string) ?? TOKENS.WETH[CHAIN.BASE],
+        fee:               (nodeConfig?.fee as number) ?? 3000,
+        recipient,
+        amountIn:          amount.toString(),
+        amountOutMinimum:  "0",
         sqrtPriceLimitX96: "0",
       },
     }),
@@ -407,8 +410,8 @@ export async function POST(request: NextRequest) {
 
     // ── Path B: Authenticated 1Shot API (fallback when method UUIDs are set) ──
     if (methodId) {
-      const oneshotParams = (registryEntry.buildParams as (a: bigint, b: `0x${string}`) => Record<string, unknown>)(
-        defaultAmount, walletAddress as `0x${string}`,
+      const oneshotParams = (registryEntry.buildParams as (a: bigint, b: `0x${string}`, c?: Record<string, unknown>) => Record<string, unknown>)(
+        defaultAmount, walletAddress as `0x${string}`, nodeConfig,
       );
       const result = await executeViaOneShot(methodId, oneshotParams, permissionsContext, `CLOVE: ${actionKey}`);
       if (result) {

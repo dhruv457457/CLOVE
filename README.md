@@ -129,6 +129,34 @@ Custom OpenAI function-calling loop using Venice's `llama-3.3-70b` model. Five t
 
 Venice decides which tools to call and in what order based on memory + market data.
 
+### 👥 Multi-agent teams (auto-wired orchestration)
+
+Pick **Multi-agent team** and CLOVE fans a prompt out into a coordinated swarm:
+
+```
+[Scout × N]  →  Convergence Analyzer  →  Risk Monitor  →  Executor
+```
+
+The "scout dimension" generalizes by agent type:
+
+- **yield / rebalancer** → one scout per **protocol** (Morpho, Aave, Aerodrome, Uniswap, Lido)
+- **copy-trader** → one scout per **whale wallet**
+
+Scouts are read-only (budget `$0`); the Analyzer holds the root ERC-7715 permission
+and sub-delegates down the chain; only the Executor transacts. Run the whole team
+in one click with **▶ Run Team** — it streams the live Scout → Risk → Executor
+pipeline with the on-chain tx + Basescan link.
+
+### 🐋 Copy-trader: track or *discover* alpha
+
+Copy-trader teams have two auto-selected modes:
+
+- **Manual** — paste `0x…` addresses → one scout tracks each via `checkWhaleTrades`
+- **Discovery** — no addresses → a **Whale Discovery Scout** finds them itself via
+  `discoverWhales`, ranking Base wallets by **realized PnL** (Dune) or size/activity
+  (Basescan fallback). The Convergence Detector then fires when 2+ alpha wallets buy
+  the same token. See **[docs/whale-discovery.md](docs/whale-discovery.md)**.
+
 ### 🗄️ Persistent memory (MongoDB)
 
 Every run writes to MongoDB Atlas (`clove` DB). The agent reads its full history before deciding:
@@ -262,6 +290,12 @@ TELEGRAM_CHAT_ID=
 
 # ── Network ───────────────────────────────────────────────
 BASE_RPC=https://mainnet.base.org
+
+# ── Whale discovery (copy-trader teams) — see docs/whale-discovery.md ──
+DUNE_API_KEY=                # dune.com → Settings → API (Base smart-money data)
+DUNE_WHALE_QUERY_ID=         # ranking query: top Base wallets
+DUNE_CONVERGENCE_QUERY_ID=   # signal query: tokens 2+ whales bought
+BASESCAN_API_KEY=            # optional paid fallback (Etherscan free ≠ Base)
 
 # ── x402 fee recipient ────────────────────────────────────
 CLOVE_PAY_TO_ADDRESS=    # wallet that receives intelligence API fees

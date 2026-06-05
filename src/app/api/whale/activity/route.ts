@@ -46,12 +46,10 @@ export interface WhaleTrade {
 }
 
 async function fetchWalletTxs(wallet: string, apiKey: string, sinceTs: number): Promise<BasescanTx[]> {
-  // Etherscan V2 multichain endpoint (chainid 8453 = Base)
   const base = "https://api.etherscan.io/v2/api";
-  const params = new URLSearchParams({
+  const common = {
     chainid:    "8453",
     module:     "account",
-    action:     "txlist",
     address:    wallet,
     startblock: "0",
     endblock:   "99999999",
@@ -59,13 +57,36 @@ async function fetchWalletTxs(wallet: string, apiKey: string, sinceTs: number): 
     offset:     "30",
     sort:       "desc",
     apikey:     apiKey || "YourApiKeyToken",
-  });
+  };
+
   try {
-    const res = await fetch(`${base}?${params}`, { signal: AbortSignal.timeout(10000) });
-    if (!res.ok) return [];
-    const data = await res.json() as { status: string; result: BasescanTx[] | string };
-    if (data.status !== "1" || !Array.isArray(data.result)) return [];
-    return data.result.filter(tx => Number(tx.timeStamp) * 1000 >= sinceTs);
+    // Fetch BOTH normal txs (for DEX interactions) AND token transfers (for symbol data).
+    // BUG 4 fix: txlist never returns tokenSymbol. tokentx does — we use it to build
+    // a symbol map keyed by txHash so convergence can group by actual token, not router.
+    const [txRes, tokRes] = await Promise.all([
+      fetch(`${base}?${new URLSearchParams({ ...common, action: "txlist" })}`, { signal: AbortSignal.timeout(10000) }),
+      fetch(`${base}?${new URLSearchParams({ ...common, action: "tokentx" })}`, { signal: AbortSignal.timeout(10000) }),
+    ]);
+
+    const txData  = txRes.ok  ? await txRes.json()  as { status: string; result: BasescanTx[] | string } : { status: "0", result: [] };
+    const tokData = tokRes.ok ? await tokRes.json() as { status: string; result: BasescanTx[] | string } : { status: "0", result: [] };
+
+    // Build hash→symbol map from token transfers
+    const symbolByHash = new Map<string, string>();
+    if (tokData.status === "1" && Array.isArray(tokData.result)) {
+      for (const t of tokData.result as BasescanTx[]) {
+        if (t.tokenSymbol && t.hash) symbolByHash.set(t.hash, t.tokenSymbol);
+      }
+    }
+
+    if (txData.status !== "1" || !Array.isArray(txData.result)) return [];
+    return (txData.result as BasescanTx[])
+      .filter(tx => Number(tx.timeStamp) * 1000 >= sinceTs)
+      .map(tx => ({
+        ...tx,
+        // Enrich with the token symbol from the parallel tokentx response
+        tokenSymbol: tx.tokenSymbol ?? symbolByHash.get(tx.hash),
+      }));
   } catch {
     return [];
   }

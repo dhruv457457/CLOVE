@@ -33,8 +33,16 @@ function buildTypeConfig(agentType: AgentType, answers: Answers, prompt: string)
   switch (agentType) {
     case "polymarket":
       return { topic: answers.topic ?? extractTopic(prompt) };
-    case "copy-trader":
-      return { wallets: Array.isArray(answers.wallets) ? answers.wallets : [] };
+    case "copy-trader": {
+      // 1st: explicit wallet list from questionnaire
+      // 2nd: any 0x addresses the user typed directly in the prompt
+      // 3rd: empty → discoverWhales tool will find them at runtime
+      const fromAnswers = Array.isArray(answers.wallets) ? (answers.wallets as string[]) : [];
+      const fromPrompt  = extractWallets(prompt);
+      const wallets     = (fromAnswers.length > 0 ? fromAnswers : fromPrompt)
+        .filter((w: string) => /^0x[a-fA-F0-9]{40}$/.test(w));
+      return { wallets };
+    }
     case "narrative":
       return { focus: answers.focus ?? "Base ecosystem tokens" };
     case "rebalancer":
@@ -99,7 +107,9 @@ export async function POST(request: NextRequest) {
   // Executor team. "yield" and "rebalancer" both manage capital across multiple
   // protocols, so the per-protocol scout fan-out makes sense for both.
   // polymarket / copy-trader / narrative remain inherently single agents.
-  const TEAM_CAPABLE: AgentType[] = ["yield", "rebalancer", "copy-trader"];
+  // copy-trader, polymarket, narrative are single-agent by design — their
+  // system prompts and tool sets are self-contained, not Scout/Risk/Executor.
+  const TEAM_CAPABLE: AgentType[] = ["yield", "rebalancer"];
   const wantsMulti =
     orchestration.toLowerCase().includes("multi") || orchestration === "Decide for me";
   const isMulti      = wantsMulti && TEAM_CAPABLE.includes(agentType);
@@ -311,30 +321,43 @@ export async function POST(request: NextRequest) {
   let executorGoal: string;
 
   if (agentType === "copy-trader") {
-    // Scouts = whale wallets (from answers.wallets or parsed from the prompt).
+    // Two modes, auto-selected:
+    //   • MANUAL    — user supplied wallet addresses → one scout per wallet.
+    //   • DISCOVERY — no addresses → a single Whale Discovery Scout that finds
+    //                 the top smart-money wallets on Base at runtime.
     const fromAnswers = Array.isArray(answers.wallets) ? (answers.wallets as string[]) : [];
     const wallets = (fromAnswers.length > 0 ? fromAnswers : extractWallets(prompt))
       .filter(w => /^0x[a-fA-F0-9]{40}$/.test(w));
-    // Fallback so the team is never empty — placeholder whales the user can edit.
-    const finalWallets = wallets.length > 0 ? wallets : [
-      "0x0000000000000000000000000000000000000001",
-      "0x0000000000000000000000000000000000000002",
-      "0x0000000000000000000000000000000000000003",
-    ];
     const shortW = (w: string) => `${w.slice(0, 6)}…${w.slice(-4)}`;
-    scoutUnits = finalWallets.map(w => ({
-      name:  `Whale ${shortW(w)} Scout`,
-      badge: shortW(w),
-      goal:
-        `Track smart-money wallet ${w} on Base. Call checkWhaleTrades scoped to ${w}. ` +
-        `Report every buy/sell (token, side, size, timestamp) to shared team memory so the ` +
-        `Convergence Detector can spot when multiple whales agree. Read-only — never trade.`,
-    }));
+
+    if (wallets.length > 0) {
+      // MANUAL mode — one scout per tracked wallet.
+      scoutUnits = wallets.map(w => ({
+        name:  `Whale ${shortW(w)} Scout`,
+        badge: shortW(w),
+        goal:
+          `Track smart-money wallet ${w} on Base. Call checkWhaleTrades scoped to ${w}. ` +
+          `Report every buy/sell (token, side, size, timestamp) to shared team memory so the ` +
+          `Convergence Detector can spot when multiple whales agree. Read-only — never trade.`,
+      }));
+    } else {
+      // DISCOVERY mode — one scout that finds the wallets itself.
+      scoutUnits = [{
+        name:  "Whale Discovery Scout",
+        badge: "discover",
+        goal:
+          `Autonomously discover the most active smart-money wallets on Base. Call discoverWhales ` +
+          `to find the top traders plus their recent trades and convergence. Report the ranked ` +
+          `wallets and any converged tokens to shared team memory so the Convergence Detector can ` +
+          `pick the strongest signal. Read-only — never trade.`,
+      }];
+    }
     scoutAgentType = "copy-trader";
     analyzerName = "Convergence Detector";
     analyzerGoal =
-      `You are the convergence detector for a ${finalWallets.length}-whale copy-trading desk. ` +
-      `Read every wallet scout's findings from shared team memory. Identify tokens that MULTIPLE ` +
+      `You are the convergence detector for a copy-trading desk` +
+      (wallets.length > 0 ? ` tracking ${wallets.length} whale wallets. ` : ` over autonomously discovered whales. `) +
+      `Read the scout findings from shared team memory. Identify tokens that MULTIPLE ` +
       `whales (2 or more) bought within the same short window — that convergence is the signal. ` +
       `Output the converged token, how many whales agree, and the net direction. ${riskClause}`;
     riskName = "Risk Monitor";
