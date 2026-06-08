@@ -894,7 +894,17 @@ Return ONLY JSON: { "riskLevel": "LOW"|"MEDIUM"|"HIGH", "safeToExecute": true|fa
       USDT:   "0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2",
       DAI:    "0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb",
     };
-    const tokenOut = tokenSymbol ? (TOKEN_ADDRESSES[tokenSymbol.toUpperCase()] ?? null) : null;
+    // Case-INSENSITIVE lookup: registry keys are mixed-case (cbBTC, cbETH) but
+    // symbols arrive in any case. A naive toUpperCase() match failed on cbBTC
+    // ("CBBTC" !== "cbBTC") — blocking a token that was actually supported.
+    const tokenOut = (() => {
+      if (!tokenSymbol) return null;
+      const want = tokenSymbol.toLowerCase();
+      for (const [sym, addr] of Object.entries(TOKEN_ADDRESSES)) {
+        if (sym.toLowerCase() === want) return addr;
+      }
+      return null;
+    })();
     if (!tokenOut) {
       return {
         tool: name, args, cost: 0,
@@ -929,7 +939,10 @@ Return ONLY JSON: { "riskLevel": "LOW"|"MEDIUM"|"HIGH", "safeToExecute": true|fa
           delegationId:       ctx.delegationId,
           walletAddress:      ctx.walletAddress,
         }),
-        signal: AbortSignal.timeout(25000),
+        // On-chain copy trade = relayer submit + forward() + confirmation, which
+        // routinely takes 30-60s. A 25s abort made the tool report "timeout /
+        // not-executed" while the tx actually succeeded on-chain. Wait long enough.
+        signal: AbortSignal.timeout(120000),
       });
       const data = await res.json() as { submitted?: boolean; prepared?: boolean; txHash?: string; via?: string };
       return {

@@ -81,7 +81,38 @@ export async function POST(request: NextRequest) {
   let txHash: string | undefined;
   let error: string | undefined;
 
-  if (canExecuteLive) {
+  // ── REAL ERC-7710 redemption on Polygon via the 1Shot PUBLIC RELAYER ────────
+  // Permissionless, gas paid in USDC from the delegation (no extra gas key, no
+  // MATIC). The agent autonomously pulls the user's granted USDC — within the
+  // cap, with NO per-bet approval — to the trading wallet that places the bet.
+  // This is the same proven path the Base deposits use, extended to Polygon.
+  if (hasRealPerm) {
+    try {
+      const { executeViaPublicRelayer } = await import("@/lib/oneshot/publicRelayer");
+      const recipient = (process.env.NEXT_PUBLIC_CLOVE_SESSION_ADDRESS ?? "0x") as `0x${string}`;
+      const r = await executeViaPublicRelayer({
+        userPermissionsContext: body.permissionsContext!,
+        recipient,
+        workAmountUsdc:         body.sizeUsdc,
+        chainId:                137,                    // Polygon
+        memo:                   `Polymarket bet: ${body.outcome} on ${body.marketId}`,
+      });
+      if (r.status === "confirmed" || r.status === "submitted") {
+        txHash = r.txHash;
+        via    = r.via;          // "1shot-public-relayer"
+        status = "submitted";    // collateral moved to the trading wallet
+      } else {
+        error = r.error ?? "relayer execution failed";
+      }
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+      console.warn("[polymarket/bet] Polygon relayer execution failed:", error);
+    }
+  }
+
+  // Only attempt the (legacy, often-unavailable) 1Shot CLOB path if the real
+  // redemption above didn't already execute — never downgrade a good tx.
+  if (canExecuteLive && status !== "submitted") {
     try {
       // 1Shot signs the CLOB order on Polygon under the user's delegation.
       // Polymarket's CLOB accepts EIP-712 signed orders; 1Shot produces the

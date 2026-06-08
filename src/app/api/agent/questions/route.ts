@@ -24,9 +24,20 @@ export interface Question {
 const SYSTEM = `You are an AI assistant helping configure an autonomous DeFi agent named CLOVE.
 
 A user typed a prompt describing what they want their agent to do. Your job:
-1. Reason about their intent (yield? DCA? risk hedge? multi-agent?)
-2. Generate exactly 6 clarifying questions to refine the agent's config
-3. Questions must feel smart and contextual — NOT generic
+1. Reason about their intent (yield? copy-trade? narrative? rebalance? multi-agent?)
+2. EXTRACT every config detail the user ALREADY stated in their prompt.
+3. Ask clarifying questions ONLY for the fields that are still MISSING or ambiguous.
+
+CRITICAL — DO NOT re-ask what the user already told you:
+- If the prompt states a budget (e.g. "$2", "10 USDC") → do NOT ask budget.
+- If it states a cadence (e.g. "every 5 minutes", "weekly", "daily") → do NOT ask schedule.
+- If it names protocols (Morpho, Aave, etc.) → do NOT ask protocols.
+- If it states risk appetite ("safe", "aggressive", "skip risky") → do NOT ask risk.
+- If it says how to be notified ("Telegram", "voice") → do NOT ask notify.
+- If it says single vs team / "multi-agent" → do NOT ask orchestration.
+- If the agent type is obvious from the prompt → do NOT ask agent type.
+Only emit a question when the value genuinely cannot be inferred. If the prompt is
+fully specified, return an EMPTY questions array.
 
 Question types available:
 - "single": pick one option
@@ -34,14 +45,8 @@ Question types available:
 - "slider": numeric range
 - "text": free text (use sparingly, 1 max)
 
-Always include questions about:
-- Agent type / archetype (FIRST question — see options below)
-- Protocol preference (which DeFi protocols)
-- Risk tolerance
-- Budget (slider, USDC, 1-500)
-- Schedule / how often to run
-- Notification style
-- Single agent vs. multi-agent orchestration team
+The fields a fully-configured agent needs (ask only the ones still unknown):
+agentType, protocols, risk, budget, schedule, notify, orchestration.
 
 CLOVE supports these agent archetypes (the "agentType" question MUST use exactly these option strings):
 - "yield" — Finds and farms the best DeFi yields on Base
@@ -49,12 +54,16 @@ CLOVE supports these agent archetypes (the "agentType" question MUST use exactly
 - "copy-trader" — Mirrors smart-money wallets when they converge (Base)
 - "narrative" — Catches social/narrative momentum early (Base)
 - "rebalancer" — Monitors real on-chain positions & rebalances to better yields (Base)
-Infer the most likely default from the user's prompt and list it first.
+
+ALSO return a "prefilled" object containing every field you DID extract from the prompt,
+using the same option strings/format as the questions (budget as a number). Example:
+"prefilled": { "agentType": "copy-trader", "budget": 2, "schedule": "Every 5 minutes", "notify": ["Telegram message"] }
 
 Return ONLY valid JSON — no prose:
 {
   "summary": "One sentence describing what you understood the user wants",
-  "questions": [
+  "prefilled": { /* fields extracted from the prompt */ },
+  "questions": [  /* ONLY the still-missing fields; [] if none */
     {
       "id": "agentType",
       "label": "What kind of agent is this?",
@@ -119,27 +128,27 @@ export async function POST(request: NextRequest) {
       model: VENICE_MODELS.compiler,
       messages: [
         { role: "system", content: SYSTEM },
-        { role: "user",   content: `User prompt: "${prompt}"\n\nGenerate 6 smart clarifying questions. Return ONLY JSON.` },
+        { role: "user",   content: `User prompt: "${prompt}"\n\nExtract everything already specified into "prefilled", and ask ONLY the fields still missing in "questions" ([] if none). Return ONLY JSON.` },
       ],
       temperature:     0.5,
       response_format: { type: "json_object" },
     });
 
     const text = res.choices[0]?.message?.content ?? "{}";
-    const parsed = JSON.parse(text) as { summary?: string; questions?: Question[] };
+    const parsed = JSON.parse(text) as { summary?: string; questions?: Question[]; prefilled?: Record<string, unknown> };
 
-    // Validate + fallback
-    const questions = Array.isArray(parsed.questions) && parsed.questions.length > 0
-      ? parsed.questions
-      : defaultQuestions();
+    // Respect a deliberately-empty array (prompt fully specified → ask nothing).
+    // Only fall back to the full default set if the model didn't return an array.
+    const questions = Array.isArray(parsed.questions) ? parsed.questions : defaultQuestions();
 
     return NextResponse.json({
       summary:   parsed.summary ?? "Setting up your DeFi agent.",
       questions,
+      prefilled: parsed.prefilled ?? {},
     });
   } catch (e) {
     console.warn("[agent/questions] Venice failed, using defaults:", e);
-    return NextResponse.json({ summary: "Setting up your DeFi agent.", questions: defaultQuestions() });
+    return NextResponse.json({ summary: "Setting up your DeFi agent.", questions: defaultQuestions(), prefilled: {} });
   }
 }
 

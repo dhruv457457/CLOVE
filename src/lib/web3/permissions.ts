@@ -12,7 +12,10 @@ import {
 } from "@metamask/smart-accounts-kit";
 import { CHAIN, USDC_ADDRESS } from "./config";
 
-// USDC on Polygon mainnet (for Polymarket agent permissions)
+// Native USDC on Polygon (0x3c49…). This is what the 1Shot Public Relayer
+// accepts for gas fees on Polygon (per relayer_getCapabilities(137)) AND what
+// Polymarket now supports as native collateral — so the whole flow uses ONE
+// token: grant → relayer fee → bet. (USDC.e would force a swap.)
 const USDC_POLYGON = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359" as const;
 // Polygon mainnet chain ID
 const POLYGON_CHAIN_ID = 137;
@@ -398,8 +401,10 @@ export async function requestPolymarketPermission(
     } else throw switchErr;
   }
 
-  // Polygon relayer targetAddress (same relayer, different chain)
-  const POLYGON_RELAYER = "0x26a529124f0bbf9af9d8f9f84a43efe47cf1199a" as `0x${string}`;
+  // 1Shot Public Relayer target on POLYGON (from relayer_getCapabilities(137)).
+  // This is per-chain — Base is 0x26a5…, Polygon is 0x3866…. The grant must
+  // delegate to the chain's relayer target or redemption fails.
+  const POLYGON_RELAYER = "0x38663d5e9d7b930bea883d27ea13e731242865fa" as `0x${string}`;
   return requestUsdcPermission(
     POLYGON_RELAYER,
     budgetUsdc,

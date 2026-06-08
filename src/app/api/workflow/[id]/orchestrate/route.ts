@@ -10,7 +10,7 @@ import {
   type DecisionPayload, type ExecutionPayload,
 } from "@/lib/agent/handoff";
 import { saveThought, generateThoughtId, generateRunId } from "@/lib/agent/thoughts";
-import { saveInsight } from "@/lib/agent/memory";
+import { saveInsight, saveRun, updatePosition } from "@/lib/agent/memory";
 import { embedText } from "@/lib/agent/embeddings";
 
 export const maxDuration = 300;
@@ -647,6 +647,14 @@ Then output a JSON decision: { action, protocol, amount, confidence, reasoning, 
             completedAt: new Date(),
             execution: { protocol: "none", amount: "0", success: false, via: "risk-blocked" },
           });
+          // Record the HOLD so the Portfolio token-flow feed shows blocked decisions.
+          await saveRun({
+            walletAddress, agentId: executor.id, runId,
+            success: false, protocol: intelligence.recommended ?? "—", action: "hold",
+            amount: "0", apy: intelligence.bestApy ?? 0, riskLevel: decision.riskLevel ?? "UNKNOWN",
+            txHash: null, costPaid: intelligence.x402Cost ?? 0,
+            veniceReason: decision.reasoning ?? "Risk Monitor held.", durationMs: 0,
+          });
           send("orchestration-complete", { packet: { ...fullPacket, phase: "complete" }, skipped: true });
           controller.close();
           return;
@@ -767,6 +775,32 @@ Execute via executeDefi now. Then notify the user.`,
           scope:         "team",
           embedding:     execEmbedding,
         });
+
+        // Record the run + position so the Portfolio dashboard reflects team
+        // executions (the single-agent run-stream path already does this; the
+        // orchestrate/team path previously did not — leaving deployed capital at $0).
+        // For copy-trade teams the meaningful label is the token bought, not the swap venue.
+        const posLabel = teamKind === "copy-trader"
+          ? (intelligence.recommended || execution.protocol)
+          : execution.protocol;
+        await saveRun({
+          walletAddress,
+          agentId:      executor.id,
+          runId,
+          success:      execution.success,
+          protocol:     posLabel,
+          action:       decision.action ?? "deposit",
+          amount:       execution.amount ?? decision.amount ?? "0",
+          apy:          intelligence.bestApy ?? 0,
+          riskLevel:    decision.riskLevel ?? "UNKNOWN",
+          txHash:       execution.txHash ?? null,
+          costPaid:     intelligence.x402Cost ?? 0,
+          veniceReason: decision.reasoning ?? execInsight,
+          durationMs:   0,
+        });
+        if (execution.success && execution.txHash) {
+          await updatePosition(walletAddress, posLabel, execution.amount ?? decision.amount ?? "0", intelligence.bestApy ?? 0);
+        }
 
         send("orchestration-complete", {
           packet:   fullPacket,

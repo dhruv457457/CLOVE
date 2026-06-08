@@ -103,13 +103,14 @@ export async function POST(request: NextRequest) {
   const typeConfig  = buildTypeConfig(agentType, answers, prompt);
   // Budget: explicit answer wins, else the registry's per-type default (not a hardcoded "10").
   const budget      = String(answers.budget ?? typeDef.defaultBudget);
-  // Team-capable archetypes can fan out into a Scout-swarm → Analyzer → Risk →
-  // Executor team. "yield" and "rebalancer" both manage capital across multiple
-  // protocols, so the per-protocol scout fan-out makes sense for both.
-  // polymarket / copy-trader / narrative remain inherently single agents.
-  // copy-trader, polymarket, narrative are single-agent by design — their
-  // system prompts and tool sets are self-contained, not Scout/Risk/Executor.
-  const TEAM_CAPABLE: AgentType[] = ["yield", "rebalancer"];
+  // Team-capable archetypes can fan out into a Scout-swarm → Analyzer/Detector →
+  // Risk → Executor team:
+  //   • yield / rebalancer → one scout per PROTOCOL
+  //   • copy-trader        → Whale Discovery/Wallet scouts → Convergence Detector
+  // The copy-trade team uses copy-trade-specific roles + tools (not the generic
+  // yield Scout/Risk/Executor), so the fan-out fits. polymarket / narrative stay
+  // single-agent (their flows don't map to a scout swarm).
+  const TEAM_CAPABLE: AgentType[] = ["yield", "rebalancer", "copy-trader"];
   const wantsMulti =
     orchestration.toLowerCase().includes("multi") || orchestration === "Decide for me";
   const isMulti      = wantsMulti && TEAM_CAPABLE.includes(agentType);

@@ -3,6 +3,7 @@
 import "./dash.css";
 import { useState, useEffect, useRef, useCallback } from "react";
 import Link from "next/link";
+import { metamaskStore } from "@/lib/web3/metamaskStore";
 
 // ── Design tokens / colors ─────────────────────────────────────────────────────
 
@@ -82,12 +83,15 @@ function CloverMark({ size = 16, color = "#C8FF3D" }: { size?: number; color?: s
 const STATUS_MAP: Record<string, { cls: string; label: string }> = {
   running:  { cls: "run",  label: "running" },
   active:   { cls: "run",  label: "active" },
+  executing:{ cls: "run",  label: "executing" },
   executed: { cls: "run",  label: "executed" },
   watching: { cls: "run",  label: "watching" },
+  planning: { cls: "run",  label: "planning" },
   pending:  { cls: "pend", label: "pending" },
   failed:   { cls: "fail", label: "failed" },
   revoked:  { cls: "fail", label: "revoked" },
   idle:     { cls: "idle", label: "idle" },
+  none:     { cls: "idle", label: "no delegation" },
   blocked:  { cls: "idle", label: "blocked" },
 };
 function StatusDot({ status, beat = false }: { status: string; beat?: boolean }) {
@@ -102,6 +106,7 @@ function StatusText({ status }: { status: string }) {
 // ── Sparkline ─────────────────────────────────────────────────────────────────
 
 function Sparkline({ points, color = "#C8FF3D", w = 160, h = 60 }: { points: number[]; color?: string; w?: number; h?: number }) {
+  if (points.length < 2) points = [0, 0];
   const max = Math.max(...points), min = Math.min(...points);
   const span = max - min || 1;
   const step = w / (points.length - 1);
@@ -131,7 +136,7 @@ function Donut({ segments, centerValue, centerLabel, size = 188, stroke = 22 }: 
 }) {
   const r = (size - stroke) / 2;
   const C = 2 * Math.PI * r;
-  const total = segments.reduce((s, x) => s + x.value, 0);
+  const total = segments.reduce((s, x) => s + x.value, 0) || 1;
   let acc = 0;
   return (
     <div className="donut" style={{ width: size, height: size }}>
@@ -159,57 +164,101 @@ function Donut({ segments, centerValue, centerLabel, size = 188, stroke = 22 }: 
   );
 }
 
-// ── Types ─────────────────────────────────────────────────────────────────────
+// ── Types (mirror /api/portfolio) ───────────────────────────────────────────────
 
-interface AllocRow  { name: string; amount: number; pct: number; apy: number; }
-interface TxRow     { status: string; main: string; amt?: string; flag?: string; hash: string; time: string; }
-interface FleetNode { id: string; name: string; type: string; status: string; action: string; budget: string; children?: FleetNode[]; }
-interface DelegNode { id: string; name: string; budget: string; status: string; addr: string; noRevoke?: boolean; children?: DelegNode[]; }
-interface RevLog    { name: string; hash: string; time: string; fresh?: boolean; }
+interface Holding { symbol: string; address: string; balance: number; priceUsd: number; valueUsd: number }
+interface Position { protocol: string; amount: string; entryApy: number }
+interface Run { protocol: string; action: string; amount: string; apy: number; txHash: string | null; success: boolean; timestamp: string; riskLevel?: string }
+interface AgentCard {
+  id: string; name: string; agentType: string; status: string; active: boolean;
+  scheduleIntervalMs: number | null; totalRuns: number; totalExecuted: number;
+  lastAction: string | null; budgetUsdc: string; budgetUsedUsdc: number; x402Total: number;
+  workflowId: string | null; parentAgentId: string | null;
+  delegationStatus: string; delegationCap: string | null; onChainAddress: string | null;
+}
+interface Portfolio {
+  wallet: string;
+  holdings: Holding[]; totalValueUsd: number;
+  positions: Position[]; deployedUsd: number; estPnlUsd: number;
+  runs: Run[]; agents: AgentCard[];
+  spend: { x402Intel: number; x402Tts: number; x402Image: number; x402Total: number; oneShotFees: number; deployedUsd: number; total: number };
+}
+interface Permission { grantedTo?: string; budgetUsdc?: string; periodDays?: number; expiresAt?: number; delegationManager?: string }
 
-// ── Portfolio Page ────────────────────────────────────────────────────────────
+// ── helpers ─────────────────────────────────────────────────────────────────────
+const short = (a?: string | null) => (a && a.length > 10 ? `${a.slice(0, 6)}…${a.slice(-4)}` : (a ?? "—"));
+const money = (n: number, d = 2) => n.toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d });
+function ago(ts: string | number | null): string {
+  if (!ts) return "—";
+  const d = Date.now() - new Date(ts).getTime();
+  const m = Math.floor(d / 60000); if (m < 1) return "just now";
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60); if (h < 24) return `${h}h ago`;
+  return `${Math.floor(h / 24)}d ago`;
+}
+function blendedApy(positions: Position[]): number {
+  const tot = positions.reduce((s, p) => s + (Number(p.amount) || 0), 0);
+  if (tot === 0) return 0;
+  return positions.reduce((s, p) => s + (Number(p.amount) || 0) * p.entryApy, 0) / tot;
+}
 
-const PF_ALLOC: AllocRow[] = [
-  { name: "Morpho",    amount: 200, pct: 41, apy: 8.4 },
-  { name: "Aave",      amount: 150, pct: 31, apy: 5.2 },
-  { name: "Aerodrome", amount: 100, pct: 20, apy: 12.1 },
-  { name: "Lido",      amount: 37,  pct:  8, apy: 4.8 },
-];
-const PF_TXS: TxRow[] = [
-  { status: "executed", main: "Morpho deposit", amt: "$50",  hash: "0xabc…7f2", time: "2h ago" },
-  { status: "executed", main: "Aave supply",    amt: "$30",  hash: "0xdef…1c9", time: "1d ago" },
-  { status: "pending",  main: "Uniswap swap",               hash: "—",          time: "5m ago" },
-  { status: "failed",   main: "Aerodrome LP",   flag: "risk HIGH", hash: "0x4a…b21", time: "3d ago" },
-];
-const PF_SPEND = [
-  { k: "Intelligence (DeFiLlama + Venice)", v: "$0.23" },
-  { k: "Text-to-speech (Venice TTS)",       v: "$0.15" },
-  { k: "Image generation (Venice FLUX)",    v: "$0.09" },
-];
+// ── Portfolio tab ────────────────────────────────────────────────────────────
 
 function txIcon(status: string) {
   if (status === "executed") return <span className="sd run" />;
   if (status === "pending")  return <span className="sd pend beat" />;
+  if (status === "idle")     return <span className="sd idle" />;
   return <span className="sd fail" />;
 }
 
-function PortfolioPage() {
-  const [r1, v1] = useCountUp(487.32, 1500, 2);
-  const [r2, v2] = useCountUp(0.47,   1500, 2);
-  const donutSegs = PF_ALLOC.map(a => ({ value: a.amount, color: apyColor(a.apy) }));
+function PortfolioTab({ pf }: { pf: Portfolio }) {
+  const [r1, v1] = useCountUp(pf.totalValueUsd, 1500, 2);
+  const pnlUp = pf.estPnlUsd >= 0;
+  const [r2, v2] = useCountUp(Math.abs(pf.estPnlUsd), 1500, 2);
+
+  // Allocation = deployed positions (protocol), else non-USDC holdings.
+  const alloc = pf.positions.length > 0
+    ? pf.positions.map(p => ({ name: p.protocol, amount: Number(p.amount) || 0, apy: p.entryApy }))
+    : pf.holdings.filter(h => h.symbol !== "USDC" && h.valueUsd > 0.01).map(h => ({ name: h.symbol, amount: +h.valueUsd.toFixed(2), apy: 0 }));
+  const allocTotal = alloc.reduce((s, a) => s + a.amount, 0) || 1;
+  const allocRows = alloc.map(a => ({ ...a, pct: Math.round((a.amount / allocTotal) * 100) }));
+  const donutSegs = allocRows.map(a => ({ value: a.amount, color: a.apy > 0 ? apyColor(a.apy) : "#7FD4FF" }));
+  const bApy = blendedApy(pf.positions);
+
+  // value trajectory for the sparkline (cost basis → current value)
+  const start = Math.max(0, pf.totalValueUsd - pf.estPnlUsd);
+  const spark = Array.from({ length: 12 }, (_, i) => start + (pf.estPnlUsd) * (i / 11));
+
+  const txs = pf.runs.map(r => {
+    const status = r.action === "hold" ? "idle" : (r.success ? "executed" : "failed");
+    return {
+      status,
+      main: r.action === "hold" ? `Held · ${r.protocol}` : `${r.protocol} ${r.action}`,
+      amt: r.action === "hold" ? undefined : `$${r.amount}`,
+      flag: !r.success && r.riskLevel === "HIGH" ? "risk HIGH" : undefined,
+      hash: r.txHash ? short(r.txHash) : "—",
+      txHash: r.txHash,
+      time: ago(r.timestamp),
+    };
+  });
+
+  const bestPos = [...pf.positions].sort((a, b) => b.entryApy - a.entryApy)[0];
+
   return (
     <div className="page">
       <div className="hero-row">
         <div className="hero-stat" ref={r1 as React.RefObject<HTMLDivElement>}>
           <span className="lab">Total portfolio value</span>
           <span className="big"><span className="pre">$</span>{v1}</span>
-          <span className="delta up">↗ +2.3% today · +$11.04</span>
-          <Sparkline points={[418,430,425,441,438,452,460,455,470,476,481,487]} />
+          <span className={`delta ${pnlUp ? "up" : "flat"}`}>
+            {pnlUp ? "↗" : "↘"} est. P/L {pnlUp ? "+" : "−"}${money(Math.abs(pf.estPnlUsd))}
+          </span>
+          <Sparkline points={spark} color={pnlUp ? "#C8FF3D" : "#FF6B5E"} />
         </div>
         <div className="hero-stat" ref={r2 as React.RefObject<HTMLDivElement>}>
-          <span className="lab">Total spent · x402</span>
-          <span className="big"><span className="pre">$</span>{v2}</span>
-          <span className="delta flat">this week · across 9 agent calls</span>
+          <span className="lab">Total spent · x402 + 1Shot</span>
+          <span className="big"><span className="pre">$</span>{money(pf.spend.total, 2)}</span>
+          <span className="delta flat">x402 ${money(pf.spend.x402Total, 2)} · 1Shot ${money(pf.spend.oneShotFees, 3)}</span>
           <Sparkline points={[2,5,3,8,6,11,9,14,12,18,16,21]} color="#F2B85C" />
         </div>
       </div>
@@ -217,39 +266,45 @@ function PortfolioPage() {
       <div className="card mb18">
         <div className="card-head">
           <span className="ct">Protocol allocation</span>
-          <span className="ch-right">colored by live APY · brighter = higher yield</span>
+          <span className="ch-right">colored by entry APY · brighter = higher yield</span>
         </div>
-        <div className="grid-2-13">
-          <div className="donut-wrap">
-            <Donut segments={donutSegs} centerValue="7.2%" centerLabel="blended apy" />
+        {allocRows.length === 0 ? (
+          <div style={{ color: "var(--mid)", padding: 12, fontSize: 13 }}>No capital deployed yet — run an agent to build positions.</div>
+        ) : (
+          <div className="grid-2-13">
+            <div className="donut-wrap">
+              <Donut segments={donutSegs} centerValue={bApy > 0 ? `${bApy.toFixed(1)}%` : `$${money(pf.totalValueUsd, 0)}`} centerLabel={bApy > 0 ? "blended apy" : "total value"} />
+            </div>
+            <div className="alloc">
+              <div className="alloc-head"><span/><span>Protocol</span><span>Value</span><span>Share</span><span>APY</span></div>
+              {allocRows.map((a, i) => {
+                const col = a.apy > 0 ? apyColor(a.apy) : "#7FD4FF";
+                return (
+                  <div className="alloc-row" key={a.name + i}>
+                    <span className="sw" style={{ background: col }} />
+                    <span className="nm">
+                      {a.name}
+                      <span className="bar"><i style={{ width: `${a.pct}%`, background: col, animationDelay: `${i * 90}ms` }} /></span>
+                    </span>
+                    <span className="aamt">${money(a.amount, 2)}</span>
+                    <span className="pct">{a.pct}%</span>
+                    <span className="rapy" style={{ color: col }}>{a.apy > 0 ? `${a.apy}%` : "—"}</span>
+                  </div>
+                );
+              })}
+            </div>
           </div>
-          <div className="alloc">
-            <div className="alloc-head"><span/><span>Protocol</span><span>Value</span><span>Share</span><span>APY</span></div>
-            {PF_ALLOC.map((a, i) => {
-              const col = apyColor(a.apy);
-              return (
-                <div className="alloc-row" key={a.name}>
-                  <span className="sw" style={{ background: col }} />
-                  <span className="nm">
-                    {a.name}
-                    <span className="bar"><i style={{ width: `${a.pct}%`, background: col, animationDelay: `${i * 90}ms` }} /></span>
-                  </span>
-                  <span className="aamt">${a.amount}</span>
-                  <span className="pct">{a.pct}%</span>
-                  <span className="rapy" style={{ color: col }}>{a.apy}%</span>
-                </div>
-              );
-            })}
-          </div>
-        </div>
+        )}
       </div>
 
       <div className="card mb18">
         <div className="card-head">
           <span className="ct">Recent transactions</span>
-          <span className="ch-right">last 7 days</span>
+          <span className="ch-right">{txs.length} on record</span>
         </div>
-        {PF_TXS.map((t, i) => (
+        {txs.length === 0 ? (
+          <div style={{ color: "var(--mid)", padding: 12, fontSize: 13 }}>No transactions yet.</div>
+        ) : txs.map((t, i) => (
           <div className="tx-row" key={i}>
             {txIcon(t.status)}
             <span className="tx-main">
@@ -257,7 +312,9 @@ function PortfolioPage() {
             </span>
             {t.flag
               ? <span className="tx-flag risk">{t.flag}</span>
-              : <span className="tx-hash">{t.hash}</span>}
+              : (t.txHash
+                  ? <a className="tx-hash" href={`https://basescan.org/tx/${t.txHash}`} target="_blank" rel="noopener noreferrer" style={{ color: "#C8FF3D", textDecoration: "none" }}>{t.hash} ↗</a>
+                  : <span className="tx-hash">{t.hash}</span>)}
             <span className="tx-time">{t.time}</span>
           </div>
         ))}
@@ -265,103 +322,73 @@ function PortfolioPage() {
 
       <div className="grid-2">
         <div className="card">
-          <div className="card-head"><span className="ct">Yield earned</span></div>
-          <div className="mini-big"><span className="pre">$</span>12.47</div>
-          <div style={{ fontSize: 11, color: "var(--mid)", marginBottom: 14, letterSpacing: "0.02em" }}>total realized + accrued</div>
-          <div className="mini-row"><span className="k">This week</span><span className="mv lime">+$0.87</span></div>
-          <div className="mini-row"><span className="k">Blended APY</span><span className="mv lime">7.2%</span></div>
-          <div className="mini-row"><span className="k">Best position · Aerodrome</span><span className="mv">12.1%</span></div>
+          <div className="card-head"><span className="ct">Holdings &amp; P/L</span></div>
+          <div className="mini-big"><span className="pre">$</span>{money(pf.totalValueUsd, 2)}</div>
+          <div style={{ fontSize: 11, color: "var(--mid)", marginBottom: 14, letterSpacing: "0.02em" }}>live on-chain value (DexScreener prices)</div>
+          <div className="mini-row"><span className="k">Est. unrealized P/L</span><span className={`mv ${pnlUp ? "lime" : ""}`} style={{ color: pnlUp ? undefined : "#FF6B5E" }}>{pnlUp ? "+" : "−"}${money(Math.abs(pf.estPnlUsd))}</span></div>
+          <div className="mini-row"><span className="k">Capital deployed</span><span className="mv">${money(pf.deployedUsd)}</span></div>
+          {bestPos && <div className="mini-row"><span className="k">Best position · {bestPos.protocol}</span><span className="mv">{bestPos.entryApy}%</span></div>}
         </div>
         <div className="card">
-          <div className="card-head"><span className="ct">x402 spend breakdown</span><span className="ch-right">$0.47 total</span></div>
-          {PF_SPEND.map((s, i) => (
-            <div className="mini-row" key={i}><span className="k">{s.k}</span><span className="mv">{s.v}</span></div>
-          ))}
-          <div className="mini-row">
-            <span className="k" style={{ color: "var(--text-2)", fontWeight: 500 }}>Cost per $ deployed</span>
-            <span className="mv">0.10%</span>
-          </div>
+          <div className="card-head"><span className="ct">x402 spend breakdown</span><span className="ch-right">${money(pf.spend.x402Total, 2)} total</span></div>
+          <div className="mini-row"><span className="k">Intelligence (DeFiLlama + Venice)</span><span className="mv">${money(pf.spend.x402Intel, 4)}</span></div>
+          <div className="mini-row"><span className="k">Text-to-speech (Venice TTS)</span><span className="mv">${money(pf.spend.x402Tts, 4)}</span></div>
+          <div className="mini-row"><span className="k">Image generation</span><span className="mv">${money(pf.spend.x402Image, 4)}</span></div>
+          <div className="mini-row"><span className="k" style={{ color: "var(--text-2)", fontWeight: 500 }}>1Shot relayer fees</span><span className="mv">${money(pf.spend.oneShotFees, 3)}</span></div>
         </div>
       </div>
     </div>
   );
 }
 
-// ── Fleet Page ────────────────────────────────────────────────────────────────
+// ── Fleet tab ────────────────────────────────────────────────────────────────
 
-const FLEET_INIT: FleetNode[] = [
-  { id: "morpho-scout", name: "Morpho Scout",    type: "yield",      status: "running",  action: "scanning vaults",      budget: "$0.05 cap",
-    children: [
-      { id: "morpho-risk", name: "Risk Monitor",    type: "guard",      status: "idle",     action: "—", budget: "$0",
-        children: [
-          { id: "morpho-exec", name: "Morpho Executor", type: "execute", status: "executed", action: "executed 2h ago", budget: "$200" },
-        ] },
-    ] },
-  { id: "aave-scout", name: "Aave Scout",       type: "yield",      status: "pending",  action: "needs permission",     budget: "$0.05 cap",
-    children: [
-      { id: "aave-risk", name: "Risk Monitor",    type: "guard",      status: "blocked",  action: "—", budget: "$0",
-        children: [
-          { id: "aave-exec", name: "Aave Executor",    type: "execute", status: "blocked",  action: "—", budget: "$150" },
-        ] },
-    ] },
-  { id: "whale",  name: "Whale Watcher",    type: "copy-trade", status: "running",  action: "watching 3 wallets",   budget: "$0.02 cap",
-    children: [
-      { id: "copy-exec", name: "Copy Executor",    type: "execute", status: "executed", action: "executed 4h ago", budget: "$25" },
-    ] },
-  { id: "poly",   name: "Polymarket Scout", type: "prediction", status: "failed",   action: "edge < 8% threshold",  budget: "$0.03 cap" },
-];
-
-function countAgents(nodes: FleetNode[]): { total: number; active: number } {
-  let total = 0, active = 0;
-  const walk = (n: FleetNode) => {
-    total++;
-    if (n.status === "running" || n.status === "watching") active++;
-    (n.children ?? []).forEach(walk);
-  };
-  nodes.forEach(walk);
-  return { total, active };
+interface TreeAgent extends AgentCard { children: TreeAgent[] }
+function buildTree(agents: AgentCard[]): TreeAgent[] {
+  const byId = new Map<string, TreeAgent>();
+  agents.forEach(a => byId.set(a.id, { ...a, children: [] }));
+  const roots: TreeAgent[] = [];
+  byId.forEach(node => {
+    if (node.parentAgentId && byId.has(node.parentAgentId)) byId.get(node.parentAgentId)!.children.push(node);
+    else roots.push(node);
+  });
+  return roots;
 }
 
-function FleetNodeComp({ node }: { node: FleetNode }) {
+function FleetNodeComp({ node }: { node: TreeAgent }) {
+  const status = node.active ? (node.status === "idle" ? "active" : node.status) : node.status;
   return (
     <div className="branch">
       <div className="tnode">
         <div className="tn-left">
-          <StatusDot status={node.status} beat />
+          <StatusDot status={status} beat />
           <span className="tn-name">{node.name}</span>
-          <span className="tn-type">{node.type}</span>
+          <span className="tn-type">{node.agentType}</span>
         </div>
         <div className="tn-mid">
-          <StatusText status={node.status} />
+          <StatusText status={status} />
           <span style={{ opacity: .4 }}>·</span>
-          <span className="act">{node.action}</span>
+          <span className="act">{node.lastAction ?? (node.scheduleIntervalMs ? "scheduled" : "—")}</span>
         </div>
         <div className="tn-right">
-          <span className="tn-budget">{node.budget}</span>
+          <span className="tn-budget">${node.budgetUsdc}</span>
         </div>
       </div>
-      {node.children && node.children.length > 0 && (
-        <div className="children">
-          {node.children.map(c => <FleetNodeComp key={c.id} node={c} />)}
-        </div>
+      {node.children.length > 0 && (
+        <div className="children">{node.children.map(c => <FleetNodeComp key={c.id} node={c} />)}</div>
       )}
     </div>
   );
 }
 
-function FleetPage() {
-  const [fleet, setFleet] = useState<FleetNode[]>(FLEET_INIT);
-  const { total, active } = countAgents(fleet);
-
-  const mapAll = useCallback((fn: (n: FleetNode) => Partial<FleetNode>) => {
-    const walk = (n: FleetNode): FleetNode => ({ ...n, ...fn(n), children: (n.children ?? []).map(walk) });
-    setFleet(f => f.map(walk));
-  }, []);
-
-  const pauseAll = () => mapAll(n =>
-    (n.status === "running" || n.status === "watching") ? { status: "idle", action: "paused by operator" } : {}
-  );
-  const runAll = () => setFleet(FLEET_INIT);
+function FleetTab({ pf }: { pf: Portfolio }) {
+  const tree = buildTree(pf.agents);
+  const total = pf.agents.length;
+  const active = pf.agents.filter(a => a.active).length;
+  const byType = pf.agents.reduce<Record<string, number>>((m, a) => { m[a.agentType] = (m[a.agentType] ?? 0) + 1; return m; }, {});
+  const failed = pf.agents.filter(a => a.status === "failed").length;
+  const pending = pf.agents.filter(a => a.delegationStatus === "pending").length;
+  const idle = pf.agents.filter(a => !a.active && a.status !== "failed").length;
 
   return (
     <div className="page">
@@ -372,116 +399,68 @@ function FleetPage() {
             <span style={{ color: "var(--text-2)" }}>{total} agents</span> · <span style={{ color: "var(--st-run)" }}>{active} active</span>
           </span>
         </div>
-        <div className="tree">
-          {fleet.map(n => <FleetNodeComp key={n.id} node={n} />)}
-        </div>
+        {total === 0 ? (
+          <div style={{ color: "var(--mid)", padding: 12, fontSize: 13 }}>No agents yet. Create one in the Builder.</div>
+        ) : (
+          <div className="tree">{tree.map(n => <FleetNodeComp key={n.id} node={n} />)}</div>
+        )}
         <div className="action-bar">
           <Link href="/dashboard" className="pbtn primary" style={{ textDecoration: "none" }}><DIcon name="add" size={13} /> New agent</Link>
-          <button className="pbtn" onClick={runAll}><DIcon name="play" size={12} /> Run all</button>
-          <button className="pbtn" onClick={pauseAll}><DIcon name="pause" size={12} /> Pause all</button>
-          <button className="pbtn danger" style={{ marginLeft: "auto" }}><DIcon name="revoke" size={13} /> Revoke all</button>
         </div>
       </div>
 
       <div className="grid-2" style={{ marginTop: 18 }}>
         <div className="card">
-          <div className="card-head"><span className="ct">By workflow type</span></div>
-          <div className="mini-row"><span className="k">Yield optimizers</span><span className="mv">2</span></div>
-          <div className="mini-row"><span className="k">Copy-trade</span><span className="mv">1</span></div>
-          <div className="mini-row"><span className="k">Prediction markets</span><span className="mv">1</span></div>
-          <div className="mini-row"><span className="k">Risk monitors</span><span className="mv">2</span></div>
+          <div className="card-head"><span className="ct">By agent type</span></div>
+          {Object.keys(byType).length === 0
+            ? <div style={{ color: "var(--mid)", padding: 8, fontSize: 13 }}>—</div>
+            : Object.entries(byType).map(([t, n]) => (
+                <div className="mini-row" key={t}><span className="k" style={{ textTransform: "capitalize" }}>{t}</span><span className="mv">{n}</span></div>
+              ))}
         </div>
         <div className="card">
           <div className="card-head"><span className="ct">Health</span></div>
-          <div className="mini-row"><span className="k"><span className="sd run" style={{ marginRight: 8 }} />Healthy</span><span className="mv lime">{active}</span></div>
-          <div className="mini-row"><span className="k"><span className="sd pend" style={{ marginRight: 8 }} />Awaiting permission</span><span className="mv">1</span></div>
-          <div className="mini-row"><span className="k"><span className="sd fail" style={{ marginRight: 8 }} />Failed</span><span className="mv">1</span></div>
-          <div className="mini-row"><span className="k"><span className="sd idle" style={{ marginRight: 8 }} />Idle / blocked</span><span className="mv">3</span></div>
+          <div className="mini-row"><span className="k"><span className="sd run" style={{ marginRight: 8 }} />Active</span><span className="mv lime">{active}</span></div>
+          <div className="mini-row"><span className="k"><span className="sd pend" style={{ marginRight: 8 }} />Pending delegation</span><span className="mv">{pending}</span></div>
+          <div className="mini-row"><span className="k"><span className="sd fail" style={{ marginRight: 8 }} />Failed</span><span className="mv">{failed}</span></div>
+          <div className="mini-row"><span className="k"><span className="sd idle" style={{ marginRight: 8 }} />Idle</span><span className="mv">{idle}</span></div>
         </div>
       </div>
     </div>
   );
 }
 
-// ── Delegation Page ───────────────────────────────────────────────────────────
+// ── Delegation tab ─────────────────────────────────────────────────────────────
 
-const DELEG_INIT: DelegNode[] = [
-  { id: "ms", name: "Morpho Scout", budget: "$0.05", status: "active", addr: "0x1a2b",
-    children: [
-      { id: "mr", name: "Risk Monitor", budget: "$0", status: "active", addr: "0x3c4d",
-        children: [
-          { id: "me", name: "Morpho Exec", budget: "$200", status: "active", addr: "0x5e6f" },
-        ] },
-    ] },
-  { id: "as", name: "Aave Scout", budget: "$0.05", status: "active", addr: "0x7g8h",
-    children: [
-      { id: "ar", name: "Risk Monitor", budget: "$0", status: "active", addr: "0x9i0j",
-        children: [
-          { id: "ae", name: "Aave Exec", budget: "$150", status: "pending", addr: "needs grant", noRevoke: true },
-        ] },
-    ] },
-  { id: "old", name: "Old Executor", budget: "$50", status: "revoked", addr: "0xdead" },
-];
-
-const REVLOG_INIT: RevLog[] = [
-  { name: "Morpho Exec v1",  hash: "0xabc123", time: "2h ago" },
-  { name: "Aerodrome Exec",  hash: "0xdef456", time: "1d ago" },
-];
-
-function DelegNodeComp({ node, onRevoke }: { node: DelegNode; onRevoke: (n: DelegNode) => void }) {
-  const revoked = node.status === "revoked";
+function DelegNodeComp({ node }: { node: TreeAgent }) {
+  const revoked = node.delegationStatus === "revoked";
+  const st = revoked ? "revoked" : (node.delegationStatus === "active" ? "active" : node.delegationStatus);
   return (
     <div className="branch">
       <div className={`tnode${revoked ? " revoked" : ""}`}>
         <div className="tn-left">
-          <StatusDot status={revoked ? "revoked" : node.status} />
+          <StatusDot status={st} />
           <span className="tn-name">{node.name}</span>
         </div>
-        <div className="tn-mid">
-          <StatusText status={revoked ? "revoked" : node.status} />
-        </div>
+        <div className="tn-mid"><StatusText status={st} /></div>
         <div className="tn-right">
-          <span className="tn-budget">{node.budget}</span>
-          {node.noRevoke
-            ? <span className="needs-grant">{node.addr}</span>
-            : <span className="tn-addr">{node.addr}</span>}
-          <button
-            className="x-btn"
-            disabled={revoked || node.noRevoke}
-            title={revoked ? "Already revoked" : "Revoke on-chain"}
-            onClick={() => onRevoke(node)}
-            aria-label="Revoke"
-          >✕</button>
+          <span className="tn-budget">{node.delegationCap ? `$${node.delegationCap}` : "$0"}</span>
+          <span className="tn-addr">{short(node.onChainAddress)}</span>
         </div>
       </div>
-      {node.children && node.children.length > 0 && (
-        <div className="children">
-          {node.children.map(c => <DelegNodeComp key={c.id} node={c} onRevoke={onRevoke} />)}
-        </div>
+      {node.children.length > 0 && (
+        <div className="children">{node.children.map(c => <DelegNodeComp key={c.id} node={c} />)}</div>
       )}
     </div>
   );
 }
 
-function DelegationPage() {
-  const [tree, setTree] = useState<DelegNode[]>(DELEG_INIT);
-  const [log, setLog] = useState<RevLog[]>(REVLOG_INIT);
-  const [freshHash, setFreshHash] = useState<string | null>(null);
-  const budgetPct = 97;
-
-  const revoke = useCallback((target: DelegNode) => {
-    const walk = (n: DelegNode): DelegNode => {
-      if (n.id === target.id) {
-        const kill = (m: DelegNode): DelegNode => ({ ...m, status: "revoked", children: (m.children ?? []).map(kill) });
-        return kill(n);
-      }
-      return { ...n, children: (n.children ?? []).map(walk) };
-    };
-    setTree(t => t.map(walk));
-    const hash = "0x" + Math.random().toString(16).slice(2, 8);
-    setFreshHash(hash);
-    setLog(l => [{ name: target.name, hash, time: "just now", fresh: true }, ...l]);
-  }, []);
+function DelegationTab({ pf, perm }: { pf: Portfolio; perm: Permission | null }) {
+  const tree = buildTree(pf.agents);
+  const budget = Number(perm?.budgetUsdc ?? 0);
+  const used = pf.deployedUsd + pf.spend.total;
+  const budgetPct = budget > 0 ? Math.min(100, Math.round((used / budget) * 100)) : 0;
+  const expires = perm?.expiresAt ? new Date(perm.expiresAt * 1000).toLocaleDateString() : "—";
 
   return (
     <div className="page">
@@ -491,17 +470,16 @@ function DelegationPage() {
             <div className="rp-title"><DIcon name="shield" size={16} /> Root permission</div>
             <div className="rp-std">ERC-7715 · MetaMask delegation</div>
           </div>
-          <button className="pbtn danger"><DIcon name="revoke" size={13} /> Revoke root</button>
         </div>
         <div className="rp-grid">
-          <div className="rp-cell"><span className="rl">Granted to</span><span className="rv mono">0x7195…6716</span></div>
-          <div className="rp-cell"><span className="rl">Duration</span><span className="rv">90 days</span></div>
-          <div className="rp-cell"><span className="rl">Expires</span><span className="rv">Jul 14, 2026</span></div>
+          <div className="rp-cell"><span className="rl">Granted to</span><span className="rv mono">{short(perm?.grantedTo ?? perm?.delegationManager)}</span></div>
+          <div className="rp-cell"><span className="rl">Period</span><span className="rv">{perm?.periodDays ?? "—"} days</span></div>
+          <div className="rp-cell"><span className="rl">Expires</span><span className="rv">{expires}</span></div>
         </div>
         <div className="budget-meter">
           <div className="bm-head">
-            <span className="bl">Budget · $500 USDC / 30 days</span>
-            <span className="bv">$487 used <span className="bpct">{budgetPct}%</span></span>
+            <span className="bl">Budget · ${perm?.budgetUsdc ?? "0"} USDC / {perm?.periodDays ?? 30} days</span>
+            <span className="bv">${money(used)} used <span className="bpct">{budgetPct}%</span></span>
           </div>
           <div className="track"><i style={{ width: `${budgetPct}%` }} /></div>
         </div>
@@ -510,22 +488,11 @@ function DelegationPage() {
       <div className="card mb18">
         <div className="card-head">
           <span className="ct">Subdelegation tree</span>
-          <span className="ch-right">tap ✕ to revoke a branch on-chain</span>
+          <span className="ch-right">Analyzer → Risk → Executor, capped per hop</span>
         </div>
-        <div className="tree">
-          {tree.map(n => <DelegNodeComp key={n.id} node={n} onRevoke={revoke} />)}
-        </div>
-      </div>
-
-      <div className="card rev-log">
-        <div className="card-head"><span className="ct">Revocation log</span></div>
-        {log.map((r, i) => (
-          <div className={`rev-row${r.fresh && r.hash === freshHash ? " fresh" : ""}`} key={i}>
-            <span className="rev-name"><span className="tag-rev">revoked</span>{r.name}</span>
-            <span className="rev-hash">{r.hash}</span>
-            <span className="rev-time">{r.time}</span>
-          </div>
-        ))}
+        {pf.agents.length === 0
+          ? <div style={{ color: "var(--mid)", padding: 12, fontSize: 13 }}>No delegations yet.</div>
+          : <div className="tree">{tree.map(n => <DelegNodeComp key={n.id} node={n} />)}</div>}
       </div>
     </div>
   );
@@ -536,7 +503,7 @@ function DelegationPage() {
 function Sidebar({ page, setPage }: { page: string; setPage: (p: string) => void }) {
   const nav = [
     { id: "portfolio",  lbl: "Portfolio",  icon: "wallet" },
-    { id: "fleet",      lbl: "Fleet",      icon: "layers", count: "12" },
+    { id: "fleet",      lbl: "Fleet",      icon: "layers" },
     { id: "delegation", lbl: "Delegation", icon: "shield" },
   ];
   return (
@@ -554,36 +521,14 @@ function Sidebar({ page, setPage }: { page: string; setPage: (p: string) => void
           <span className="ico"><DIcon name="grid" /></span><span>Builder</span>
         </Link>
         {nav.map(n => (
-          <button
-            key={n.id}
-            className={page === n.id ? "sactive" : ""}
-            onClick={() => setPage(n.id)}
-          >
+          <button key={n.id} className={page === n.id ? "sactive" : ""} onClick={() => setPage(n.id)}>
             <span className="ico"><DIcon name={n.icon} /></span>
             <span>{n.lbl}</span>
-            {n.count && <span className="scount">{n.count}</span>}
           </button>
         ))}
-        <button onClick={() => {}}>
-          <span className="ico"><DIcon name="coin" /></span>
-          <span>Earnings</span>
-          <span className="scount">$48</span>
-        </button>
-        <button onClick={() => {}}>
-          <span className="ico"><DIcon name="book" /></span>
-          <span>Address book</span>
-        </button>
       </nav>
 
       <div className="side-spacer" />
-
-      <div className="ask-ai">
-        <div className="ahead">
-          <span className="albl">Ask clove</span>
-          <span className="apl">⌘K</span>
-        </div>
-        <textarea placeholder="Ask about your portfolio…" rows={2} />
-      </div>
 
       <div className="side-foot">
         <a href="#">Docs</a>
@@ -596,38 +541,40 @@ function Sidebar({ page, setPage }: { page: string; setPage: (p: string) => void
 
 // ── Stat strip ────────────────────────────────────────────────────────────────
 
-function StatStrip() {
-  const [r1, v1] = useCountUp(487,  1400, 0);
-  const [r2, v2] = useCountUp(12,   1100, 0);
-  const [r3, v3] = useCountUp(3,    1000, 0);
-  const [r4, v4] = useCountUp(0.47, 1400, 2);
-  const [r5, v5] = useCountUp(7.2,  1300, 1);
+function StatStrip({ pf }: { pf: Portfolio }) {
+  const active = pf.agents.filter(a => a.active).length;
+  const bApy = blendedApy(pf.positions);
+  const [r1, v1] = useCountUp(pf.totalValueUsd, 1400, 2);
+  const [r2, v2] = useCountUp(pf.agents.length, 1100, 0);
+  const [r3, v3] = useCountUp(active, 1000, 0);
+  const [r4, v4] = useCountUp(pf.spend.x402Total, 1400, 2);
+  const [r5, v5] = useCountUp(bApy, 1300, 1);
   return (
     <div className="stat-strip">
       <div className="stat-tile" ref={r1 as React.RefObject<HTMLDivElement>}>
         <span className="lab">Portfolio</span>
         <span className="v"><span className="pre">$</span>{v1}</span>
-        <span className="sub up">↗ +2.3% today</span>
+        <span className={`sub ${pf.estPnlUsd >= 0 ? "up" : ""}`}>{pf.estPnlUsd >= 0 ? "↗ +" : "↘ −"}${money(Math.abs(pf.estPnlUsd))} P/L</span>
       </div>
       <div className="stat-tile" ref={r2 as React.RefObject<HTMLDivElement>}>
         <span className="lab">Agents</span>
         <span className="v">{v2}</span>
-        <span className="sub">across 4 workflows</span>
+        <span className="sub">{pf.positions.length} positions</span>
       </div>
       <div className="stat-tile" ref={r3 as React.RefObject<HTMLDivElement>}>
         <span className="lab">Active now</span>
         <span className="v lime">{v3}</span>
-        <span className="sub">3 running · 1 pending</span>
+        <span className="sub">{pf.agents.length - active} idle</span>
       </div>
       <div className="stat-tile" ref={r4 as React.RefObject<HTMLDivElement>}>
         <span className="lab">x402 paid</span>
         <span className="v"><span className="pre">$</span>{v4}</span>
-        <span className="sub">this week</span>
+        <span className="sub">+ ${money(pf.spend.oneShotFees, 3)} 1Shot</span>
       </div>
       <div className="stat-tile" ref={r5 as React.RefObject<HTMLDivElement>}>
         <span className="lab">Blended yield</span>
         <span className="v lime">{v5}<span className="suf">%</span></span>
-        <span className="sub">$12.47 earned</span>
+        <span className="sub">${money(pf.deployedUsd)} deployed</span>
       </div>
     </div>
   );
@@ -635,49 +582,82 @@ function StatStrip() {
 
 // ── App shell ─────────────────────────────────────────────────────────────────
 
-const PAGES: Record<string, { lbl: string; pill?: string; Comp: React.FC }> = {
-  portfolio:  { lbl: "Portfolio",  Comp: PortfolioPage },
-  fleet:      { lbl: "Fleet",      pill: "12", Comp: FleetPage },
-  delegation: { lbl: "Delegation", Comp: DelegationPage },
-};
 const PAGE_ORDER = ["portfolio", "fleet", "delegation"];
+const PAGE_LBL: Record<string, string> = { portfolio: "Portfolio", fleet: "Fleet", delegation: "Delegation" };
+
+const EMPTY_PF: Portfolio = {
+  wallet: "", holdings: [], totalValueUsd: 0, positions: [], deployedUsd: 0, estPnlUsd: 0,
+  runs: [], agents: [], spend: { x402Intel: 0, x402Tts: 0, x402Image: 0, x402Total: 0, oneShotFees: 0, deployedUsd: 0, total: 0 },
+};
 
 export default function PortfolioDashboard() {
   const [page, setPage] = useState("portfolio");
-  const { Comp } = PAGES[page];
+  const [wallet, setWallet] = useState<string | null>(null);
+  const [pf, setPf] = useState<Portfolio | null>(null);
+  const [perm, setPerm] = useState<Permission | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    setWallet(metamaskStore.getState().userAddress);
+    const unsub = metamaskStore.addListener(() => setWallet(metamaskStore.getState().userAddress));
+    return () => unsub?.();
+  }, []);
+
+  const load = useCallback(async () => {
+    if (!wallet) { setLoading(false); return; }
+    setLoading(true);
+    try {
+      const [pRes, permRes] = await Promise.all([
+        fetch(`/api/portfolio?wallet=${encodeURIComponent(wallet)}`),
+        fetch(`/api/permission?wallet=${encodeURIComponent(wallet)}`),
+      ]);
+      if (pRes.ok) setPf(await pRes.json() as Portfolio);
+      if (permRes.ok) setPerm(((await permRes.json()) as { permission: Permission | null }).permission);
+    } finally { setLoading(false); }
+  }, [wallet]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const data = pf ?? EMPTY_PF;
+  const active = data.agents.filter(a => a.active).length;
 
   return (
     <div className="pdash">
       <Sidebar page={page} setPage={setPage} />
       <div className="dash-main">
-        {/* header */}
         <div className="dash-head">
           <div className="crumb">
             <span>Dashboard</span>
             <span className="sep">/</span>
-            <span className="here">{PAGES[page].lbl}</span>
+            <span className="here">{PAGE_LBL[page]}</span>
           </div>
           <div className="hgrow" />
-          <div className="live-chip"><span className="ld" /> 3 agents live</div>
-          <button className="hwallet"><span className="wd" /> 0x7195…6716</button>
+          <button onClick={load} className="live-chip" style={{ cursor: "pointer", border: "none" }}>
+            <span className="ld" /> {loading ? "loading…" : `${active} agents live`}
+          </button>
+          <span className="hwallet"><span className="wd" /> {wallet ? short(wallet) : "not connected"}</span>
         </div>
 
-        {/* KPI strip */}
-        <StatStrip />
+        <StatStrip pf={data} />
 
-        {/* tab nav */}
         <div className="tab-nav">
           {PAGE_ORDER.map(id => (
             <button key={id} className={page === id ? "ton" : ""} onClick={() => setPage(id)}>
-              {PAGES[id].lbl}
-              {PAGES[id].pill && <span className="pill">{PAGES[id].pill}</span>}
+              {PAGE_LBL[id]}
             </button>
           ))}
         </div>
 
-        {/* page content */}
         <div className="dash-scroll">
-          <Comp key={page} />
+          {!wallet ? (
+            <div className="page"><div className="card" style={{ textAlign: "center", color: "var(--mid)", padding: 40 }}>Connect your wallet to view your portfolio.</div></div>
+          ) : (
+            <>
+              {page === "portfolio"  && <PortfolioTab  key="p" pf={data} />}
+              {page === "fleet"      && <FleetTab      key="f" pf={data} />}
+              {page === "delegation" && <DelegationTab key="d" pf={data} perm={perm} />}
+            </>
+          )}
         </div>
       </div>
     </div>

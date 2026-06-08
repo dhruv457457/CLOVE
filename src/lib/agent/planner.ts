@@ -286,7 +286,10 @@ Return ONLY JSON:
         { role: "user", content: `Goal: ${goal}\n\nPlan reasoning: ${plan.reasoning}\n\nResults:\n${resultsBlock}\n\nReturn ONLY JSON.` },
       ],
       temperature: 0.3,
-      response_format: { type: "json_object" },
+      // NOTE: llama-3.3-70b on Venice returns a bare 400 when response_format is
+      // json_object — that mode only works on the qwen compiler model. The prompt
+      // already asks for "ONLY JSON" and we strip fences + JSON.parse below, so we
+      // don't need the strict response_format here.
     });
     const raw  = res.choices[0]?.message?.content ?? "{}";
     // LLM-4 fix: strip markdown code fences if model wraps the response

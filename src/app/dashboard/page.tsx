@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   ReactFlow,
@@ -508,6 +508,10 @@ export default function DashboardPage() {
   const router = useRouter();
 
   const [agents,       setAgents]       = useState<Agent[]>([]);
+  // Which workflow the Hub canvas is currently showing. null = newest workflow.
+  // "__solo__" = the solo (no-workflow) agents. Keeps each workflow on its own
+  // canvas instead of piling every agent ever created onto one screen.
+  const [activeWorkflowId, setActiveWorkflowId] = useState<string | null>(null);
   const [nodes,        setNodes,        onNodesChange] = useNodesState<Node>([]);
   const [edges,        setEdges,        onEdgesChange] = useEdgesState<Edge>([]);
   const [creating,     setCreating]     = useState(false);
@@ -545,7 +549,10 @@ export default function DashboardPage() {
   const [scheduleAgent,    setScheduleAgent]    = useState<Agent | null>(null);
 
   // New Workflow modal — the primary creation flow
-  const [newWorkflowOpen,  setNewWorkflowOpen]  = useState(false);
+  // Single creation entry point = a centered Create panel. "New workflow" + the
+  // empty-state CTA open it (works regardless of whether the canvas has agents).
+  const [createOpen, setCreateOpen] = useState(false);
+  const openCreate = useCallback(() => setCreateOpen(true), []);
 
   // UX-1: In-UI toast system — replaces all alert()/confirm() calls
   const [toasts, setToasts] = useState<Array<{ id: string; msg: string; type: "success"|"error"|"info" }>>([]);
@@ -612,9 +619,42 @@ const loadAgents = useCallback(async () => {
       .catch(() => {});
   }, [selectedAgentId, agents]);
 
-  // Build canvas nodes from agents
+  // ── Workflow grouping so each workflow is its own canvas ───────────────────
+  // Distinct workflows (newest first), plus a "Solo agents" bucket. Used both to
+  // filter the canvas and to populate the workflow switcher.
+  const workflowList = useMemo(() => {
+    const groups: { id: string; label: string; count: number }[] = [];
+    const idx = new Map<string, number>();
+    for (const a of agents) {
+      const wf = a.workflowId ?? "__solo__";
+      if (!idx.has(wf)) { idx.set(wf, groups.length); groups.push({ id: wf, label: "", count: 0 }); }
+      groups[idx.get(wf)!].count++;
+    }
+    for (const g of groups) {
+      if (g.id === "__solo__") { g.label = "Solo agents"; continue; }
+      const members = agents.filter(a => (a.workflowId ?? "__solo__") === g.id);
+      const lead = members.find(m => /executor|analyzer|detector|copy trade/i.test(m.name))
+        ?? members[members.length - 1] ?? members[0];
+      g.label = lead ? lead.name.replace(/\s+(Executor|Scout|Agent)$/i, "").trim() || lead.name : "Workflow";
+    }
+    return groups;
+  }, [agents]);
+
+  // The workflow actually shown: explicit selection if still present, else newest.
+  const effectiveWorkflowId = useMemo(() => {
+    if (activeWorkflowId && workflowList.some(w => w.id === activeWorkflowId)) return activeWorkflowId;
+    return workflowList[0]?.id ?? null;
+  }, [activeWorkflowId, workflowList]);
+
+  // Only the active workflow's agents are on the canvas (no more pile-up).
+  const visibleAgents = useMemo(() => {
+    if (!effectiveWorkflowId) return agents;
+    return agents.filter(a => (a.workflowId ?? "__solo__") === effectiveWorkflowId);
+  }, [agents, effectiveWorkflowId]);
+
+  // Build canvas nodes from the active workflow's agents
   useEffect(() => {
-    setNodes(agents.map((a, i) => ({
+    setNodes(visibleAgents.map((a, i) => ({
       id:       a.id,
       type:     "agent",
       position: a.position ?? { x: 80 + (i % 3) * 320, y: 80 + Math.floor(i / 3) * 220 },
@@ -628,9 +668,9 @@ const loadAgents = useCallback(async () => {
       },
     })));
 
-    // Build delegation edges
+    // Build delegation edges (scoped to the visible workflow)
     const newEdges: Edge[] = [];
-    for (const a of agents) {
+    for (const a of visibleAgents) {
       if (a.parentAgentId) {
         const isActive = a.delegationStatus === "active";
         newEdges.push({
@@ -651,7 +691,7 @@ const loadAgents = useCallback(async () => {
       }
     }
     setEdges(newEdges);
-  }, [agents, router, setNodes, setEdges]);
+  }, [visibleAgents, router, setNodes, setEdges]);
 
   // Fix 2: open delegate modal — bind user permission first if needed
   const openDelegate = useCallback(async (parent: Agent) => {
@@ -773,60 +813,20 @@ const loadAgents = useCallback(async () => {
   // page renders the real-time timeline, agent thoughts, decision, and the
   // on-chain tx / Basescan link as events stream in.
   const runTeam = useCallback(() => {
-    // Pick the workflow with the most agents (the active team).
-    const counts = new Map<string, number>();
-    for (const a of agents) {
-      if (a.workflowId) counts.set(a.workflowId, (counts.get(a.workflowId) ?? 0) + 1);
-    }
-    const target = [...counts.entries()].sort((x, y) => y[1] - x[1])[0]?.[0];
-    if (!target) { toast("No multi-agent workflow found to run.", "info"); return; }
+    // Run the workflow currently shown on the canvas.
+    const target = effectiveWorkflowId && effectiveWorkflowId !== "__solo__"
+      ? effectiveWorkflowId
+      : null;
+    if (!target) { toast("Select a workflow to run (solo agents run individually).", "info"); return; }
     setTeamRunning(true);
     router.push(`/dashboard/workflow/${target}?run=1`);
-  }, [agents, router, toast]);
+  }, [effectiveWorkflowId, router, toast]);
 
-  // Fix: NL prompt now opens questionnaire first (Claude Design style)
-  const submitNlPrompt = useCallback(async () => {
+  // Shared creation path — used by both the direct (no-questions) flow and the
+  // questionnaire submit. Posts answers to from-answers and handles post-create UX.
+  const createFromAnswers = useCallback(async (prompt: string, answersObj: Record<string, unknown>) => {
     const wallet = metamaskStore.getState().userAddress;
-    if (!wallet || !nlPrompt.trim()) return;
-    setNlSubmitting(true);
-    try {
-      const res = await fetch("/api/agent/questions", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt: nlPrompt.trim() }),
-      });
-      if (!res.ok) throw new Error("Questions API failed");
-      const data = await res.json() as { summary: string; questions: Question[] };
-      // Pre-fill slider defaults
-      const defaultAnswers: Record<string, unknown> = {};
-      for (const q of data.questions) {
-        if (q.type === "slider") defaultAnswers[q.id] = q.defaultVal ?? q.min ?? 10;
-      }
-      setAnswers(defaultAnswers);
-      setQuestionnaire({ ...data, originalPrompt: nlPrompt.trim() });
-      setNlPrompt("");
-    } catch {
-      // Fallback: create agent directly
-      const wallet2 = metamaskStore.getState().userAddress;
-      if (wallet2) {
-        await fetch("/api/agent", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ walletAddress: wallet2, name: "Strategy Agent", goal: nlPrompt.trim(), budgetUsdc: "10" }),
-        });
-        await loadAgents();
-        setNlPrompt("");
-      }
-    } finally {
-      setNlSubmitting(false);
-    }
-  }, [nlPrompt, loadAgents]);
-
-  // Submit questionnaire answers → create agent(s) + auto-wire
-  const submitQuestionnaire = useCallback(async () => {
-    if (!questionnaire) return;
-    const wallet = metamaskStore.getState().userAddress;
-    if (!wallet) return;
+    if (!wallet || !prompt.trim()) return;
     setQSubmitting(true);
     try {
       const mm = metamaskStore.getState();
@@ -834,24 +834,23 @@ const loadAgents = useCallback(async () => {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          prompt:             questionnaire.originalPrompt,
+          prompt:             prompt.trim(),
           walletAddress:      wallet,
-          answers,
+          answers:            answersObj,
           permissionsContext: mm.permission?.permissionsContext,
           delegationManager:  mm.permission?.delegationManager,
         }),
       });
       if (!res.ok) throw new Error("from-answers failed");
-      const data = await res.json() as { agents: unknown[]; wired: boolean; chain?: string };
+      const data = await res.json() as { agents: unknown[]; wired: boolean; chain?: string; workflow?: { id?: string } };
       setQuestionnaire(null);
       setAnswers({});
+      // Switch the Hub canvas to the freshly created workflow so it shows ONLY
+      // the new team — previous workflows move out of view (still in History).
+      if (data.workflow?.id) setActiveWorkflowId(data.workflow.id);
       await loadAgents();
 
       const agentCount = (data.agents as unknown[]).length;
-
-      // UX-5: check if user has a real permission AFTER creation.
-      // If not → automatically open Step 3 "Grant permission" so users don't
-      // land on a canvas full of "● demo" with no explanation.
       const freshPerm = metamaskStore.getState().permission;
       const hasFreshRealPerm = !!(
         freshPerm?.permissionsContext &&
@@ -864,21 +863,66 @@ const loadAgents = useCallback(async () => {
         setPostCreateAgentCount(agentCount);
         setPostCreatePermOpen(true);   // triggers Step 3 modal
       } else {
-        // Permission exists — auto-bind to any newly created pending agents right now.
-        // This runs silently in the background so the user never has to open Scan.
         await bindPermissionToPendingAgents();
-        if (data.wired && data.chain) {
-          toast(`Team live: ${data.chain} ✓`, "success");
-        } else {
-          toast("Agent created and activated ✓", "success");
-        }
+        if (data.wired && data.chain) toast(`Team live: ${data.chain} ✓`, "success");
+        else                          toast("Agent created and activated ✓", "success");
       }
     } catch (e) {
       toast("Failed to create agent: " + (e instanceof Error ? e.message : String(e)), "error");
     } finally {
       setQSubmitting(false);
     }
-  }, [questionnaire, answers, loadAgents]);
+  }, [loadAgents, bindPermissionToPendingAgents, toast]);
+
+  // Floating bar: ask Venice for ONLY the still-missing questions. If the prompt
+  // is fully specified (no questions), create immediately; else open the modal
+  // pre-filled with whatever was already extracted.
+  const submitNlPrompt = useCallback(async () => {
+    const wallet = metamaskStore.getState().userAddress;
+    if (!wallet || !nlPrompt.trim()) return;
+    const prompt = nlPrompt.trim();
+    setNlSubmitting(true);
+    try {
+      const res = await fetch("/api/agent/questions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt }),
+      });
+      if (!res.ok) throw new Error("Questions API failed");
+      const data = await res.json() as { summary: string; questions: Question[]; prefilled?: Record<string, unknown> };
+      // Merge extracted values + slider defaults for any question still asked.
+      const merged: Record<string, unknown> = { ...(data.prefilled ?? {}) };
+      for (const q of data.questions) {
+        if (q.type === "slider" && merged[q.id] === undefined) merged[q.id] = q.defaultVal ?? q.min ?? 10;
+      }
+      setNlPrompt("");
+      if (!data.questions || data.questions.length === 0) {
+        await createFromAnswers(prompt, merged);     // fully specified → just build it
+      } else {
+        setAnswers(merged);
+        setQuestionnaire({ ...data, originalPrompt: prompt });
+      }
+    } catch {
+      const wallet2 = metamaskStore.getState().userAddress;
+      if (wallet2) {
+        await fetch("/api/agent", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ walletAddress: wallet2, name: "Strategy Agent", goal: prompt, budgetUsdc: "10" }),
+        });
+        await loadAgents();
+        setNlPrompt("");
+      }
+    } finally {
+      setNlSubmitting(false);
+    }
+  }, [nlPrompt, createFromAnswers, loadAgents]);
+
+  // Submit questionnaire answers → reuse the shared creation path.
+  const submitQuestionnaire = useCallback(async () => {
+    if (!questionnaire) return;
+    await createFromAnswers(questionnaire.originalPrompt, answers);
+  }, [questionnaire, answers, createFromAnswers]);
 
   const savedPerm = metamaskStore.getState().permission;
   const hasRealPermission = !!(
@@ -922,7 +966,7 @@ const loadAgents = useCallback(async () => {
 
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
           <button
-            onClick={() => setNewWorkflowOpen(true)}
+            onClick={openCreate}
             style={{
               display: "flex", alignItems: "center", justifyContent: "center", gap: 9,
               padding: "10px 12px", borderRadius: 9,
@@ -958,7 +1002,7 @@ const loadAgents = useCallback(async () => {
             label="History"
             onClick={() => router.push("/dashboard/history")}
           />
-          <NavItem icon={BarChart2}       label="Analytics"  />
+          <NavItem icon={BarChart2}       label="Portfolio"  onClick={() => router.push("/dashboard/portfolio")} />
           <NavItem icon={BookUser}        label="Address book" />
         </nav>
 
@@ -978,6 +1022,26 @@ const loadAgents = useCallback(async () => {
         <span style={{ color: MID, fontSize: 12, opacity: 0.5 }}>/</span>
         <span style={{ fontSize: 13, fontWeight: 500, color: TEXT }}>Agents</span>
         <span style={{ fontSize: 11, color: MID, letterSpacing: "0.06em" }}>· {agents.length} active</span>
+
+        {/* Workflow switcher — each workflow is its own canvas */}
+        {workflowList.length > 1 && (
+          <select
+            value={effectiveWorkflowId ?? ""}
+            onChange={(e) => setActiveWorkflowId(e.target.value)}
+            title="Switch workflow — each is its own canvas"
+            style={{
+              marginLeft: 10, padding: "4px 8px", borderRadius: 6,
+              background: INK_1, color: TEXT, border: `1px solid ${LINE_MID}`,
+              fontSize: 11.5, cursor: "pointer", maxWidth: 220,
+            }}
+          >
+            {workflowList.map((w) => (
+              <option key={w.id} value={w.id}>
+                {w.label} · {w.count} agent{w.count !== 1 ? "s" : ""}
+              </option>
+            ))}
+          </select>
+        )}
         <div style={{ flex: 1 }} />
 
         {/* One-click team run */}
@@ -1069,16 +1133,16 @@ const loadAgents = useCallback(async () => {
         </ReactFlow>
 
         {agents.length === 0 && (
-          <EmptyState onCreate={() => setNewWorkflowOpen(true)} />
+          <EmptyState onCreate={openCreate} />
         )}
 
-        {/* Floating NL prompt bar — only show when canvas has agents
-            (empty state has its own prominent CTA, no need to duplicate) */}
-        {agents.length > 0 && (
-          <FloatingPromptBar
+        {/* Single, centered Create panel — replaces the old thin floating bar */}
+        {createOpen && (
+          <CreatePanel
             value={nlPrompt}
             onChange={setNlPrompt}
-            onSubmit={submitNlPrompt}
+            onSubmit={() => { setCreateOpen(false); submitNlPrompt(); }}
+            onClose={() => setCreateOpen(false)}
             submitting={nlSubmitting}
           />
         )}
@@ -1192,37 +1256,6 @@ const loadAgents = useCallback(async () => {
           agent={scheduleAgent}
           onClose={() => setScheduleAgent(null)}
           onSaved={async () => { setScheduleAgent(null); await loadAgents(); }}
-        />
-      )}
-
-      {/* New Workflow modal — primary creation flow */}
-      {newWorkflowOpen && (
-        <NewWorkflowModal
-          onClose={() => setNewWorkflowOpen(false)}
-          onSubmit={async (prompt: string) => {
-            // Reuse existing questionnaire flow — same path the floating bar takes
-            const wallet = metamaskStore.getState().userAddress;
-            if (!wallet || !prompt.trim()) return;
-            setQSubmitting(false);
-            try {
-              const res = await fetch("/api/agent/questions", {
-                method:  "POST",
-                headers: { "Content-Type": "application/json" },
-                body:    JSON.stringify({ prompt: prompt.trim() }),
-              });
-              if (!res.ok) throw new Error("questions failed");
-              const data = await res.json() as { summary: string; questions: Question[] };
-              const defaultAnswers: Record<string, unknown> = {};
-              for (const q of data.questions) {
-                if (q.type === "slider") defaultAnswers[q.id] = q.defaultVal ?? q.min ?? 10;
-              }
-              setAnswers(defaultAnswers);
-              setQuestionnaire({ ...data, originalPrompt: prompt.trim() });
-              setNewWorkflowOpen(false);
-            } catch (e) {
-              toast("Failed to generate questions: " + (e instanceof Error ? e.message : String(e)), "error");
-            }
-          }}
         />
       )}
 
@@ -1584,108 +1617,102 @@ const NL_PRESET_GROUPS: Array<{ category: string; icon: string; examples: string
 
 const NL_PRESETS = NL_PRESET_GROUPS.flatMap(g => g.examples);
 
-function FloatingPromptBar({
-  value, onChange, onSubmit, submitting,
+function CreatePanel({
+  value, onChange, onSubmit, onClose, submitting,
 }: {
   value: string;
   onChange: (v: string) => void;
   onSubmit: () => void;
+  onClose: () => void;
   submitting: boolean;
 }) {
-  const [showPresets, setShowPresets] = useState(false);
-  const connected = metamaskStore.getState().userAddress;
-
-  if (!connected) return null;
-
+  // One representative example per category, as quick-fill chips.
+  const examples = NL_PRESET_GROUPS.flatMap(g => g.examples.slice(0, 1).map(ex => ({ icon: g.icon, category: g.category, ex })));
   return (
     <div
+      onClick={onClose}
       style={{
-        position: "absolute", bottom: 20, left: 20, right: 20, zIndex: 10,
-        display: "flex", gap: 8, alignItems: "flex-end",
+        position: "fixed", inset: 0, zIndex: 600,
+        display: "flex", alignItems: "center", justifyContent: "center",
+        background: "rgba(8,9,7,0.72)", backdropFilter: "blur(8px)",
+        animation: "fadeInUp 0.16s ease",
       }}
     >
-      <div style={{ flex: 1, position: "relative" }}>
-        {showPresets && (
-          <div style={{
-            position: "absolute", bottom: "calc(100% + 6px)", left: 0, right: 0,
-            background: INK_1, border: `1px solid ${LINE_MID}`, borderRadius: 10,
-            overflow: "hidden", zIndex: 20, maxHeight: 380, overflowY: "auto",
-            boxShadow: "0 10px 32px -8px rgba(0,0,0,0.6)",
-          }}>
-            <div style={{ padding: "10px 14px 6px", fontSize: 9.5, color: MID, letterSpacing: "0.12em", textTransform: "uppercase", borderBottom: `1px solid ${LINE}` }}>
-              Examples — click to use
-            </div>
-            {NL_PRESET_GROUPS.map((group, gi) => (
-              <div key={gi}>
-                <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "10px 14px 4px", fontSize: 10, color: MID, letterSpacing: "0.06em", textTransform: "uppercase", fontWeight: 500 }}>
-                  <span style={{ fontSize: 12 }}>{group.icon}</span> {group.category}
-                </div>
-                {group.examples.map((p, i) => (
-                  <button
-                    key={i}
-                    onClick={() => { onChange(p); setShowPresets(false); }}
-                    style={{
-                      width: "100%", textAlign: "left", padding: "8px 14px 8px 32px",
-                      background: "transparent", border: "none", color: TEXT2,
-                      fontSize: 12.5, cursor: "pointer", fontFamily: "var(--sans)",
-                      lineHeight: 1.4, letterSpacing: "-0.005em",
-                    }}
-                    onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(244,241,234,0.05)"; e.currentTarget.style.color = TEXT; }}
-                    onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = TEXT2; }}
-                  >
-                    {p}
-                  </button>
-                ))}
-              </div>
-            ))}
-          </div>
-        )}
-        <div style={{
-          display: "flex", alignItems: "center", gap: 8,
-          background: INK_1, border: `1px solid ${LINE_MID}`, borderRadius: 10,
-          padding: "10px 12px",
-          backdropFilter: "blur(12px)",
-          boxShadow: "0 8px 32px -8px rgba(0,0,0,0.6)",
-        }}>
-          <span style={{ fontSize: 14 }}>🤖</span>
-          <textarea
-            rows={1}
-            value={value}
-            onChange={(e) => onChange(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); onSubmit(); } }}
-            placeholder="Describe your agent's goal…"
-            style={{
-              flex: 1, background: "transparent", border: "none", outline: "none",
-              color: TEXT, fontSize: 13, fontFamily: "var(--sans)", resize: "none",
-              lineHeight: 1.4, letterSpacing: "-0.005em",
-            }}
-          />
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          width: "min(620px, 92vw)", background: INK_1, border: `1px solid ${LINE_MID}`,
+          borderRadius: 18, padding: 26, boxShadow: "0 24px 80px -20px rgba(0,0,0,0.85)",
+          display: "flex", flexDirection: "column", gap: 16,
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center" }}>
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 7, fontSize: 10.5, letterSpacing: "0.14em", textTransform: "uppercase", color: ACCENT }}>
+            <Sparkles size={13} /> New agent
+          </span>
+          <span style={{ flex: 1 }} />
+          <button onClick={onClose} style={{ background: "transparent", border: "none", color: MID, cursor: "pointer", padding: 4 }}><X size={16} /></button>
+        </div>
+
+        <div>
+          <h2 style={{ margin: 0, fontSize: 22, fontWeight: 600, color: TEXT, letterSpacing: "-0.02em" }}>What should your agent do?</h2>
+          <p style={{ margin: "6px 0 0", fontSize: 13, color: MID, lineHeight: 1.5 }}>
+            Describe it in plain English. CLOVE asks only what&apos;s unclear, then builds + wires it on Base.
+          </p>
+        </div>
+
+        <textarea
+          autoFocus
+          rows={4}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); onSubmit(); } }}
+          placeholder="e.g. Copy the smartest money on Base — mirror them when 2+ converge. Budget $2, every 5 minutes, Telegram report."
+          style={{
+            width: "100%", background: INK, border: `1px solid ${LINE_MID}`, borderRadius: 12,
+            padding: "14px 16px", color: TEXT, fontSize: 14, fontFamily: "var(--sans)",
+            resize: "none", lineHeight: 1.5, outline: "none", letterSpacing: "-0.005em",
+          }}
+          onFocus={(e) => { e.currentTarget.style.borderColor = ACCENT_SOFT; }}
+          onBlur={(e) => { e.currentTarget.style.borderColor = LINE_MID; }}
+        />
+
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
+          {examples.map((x, i) => (
+            <button
+              key={i}
+              onClick={() => onChange(x.ex)}
+              title={x.ex}
+              style={{
+                display: "inline-flex", alignItems: "center", gap: 6, padding: "6px 11px",
+                background: "rgba(244,241,234,0.04)", border: `1px solid ${LINE}`, borderRadius: 999,
+                color: TEXT2, fontSize: 11.5, cursor: "pointer",
+              }}
+              onMouseEnter={(e) => { e.currentTarget.style.borderColor = LINE_MID; e.currentTarget.style.color = TEXT; }}
+              onMouseLeave={(e) => { e.currentTarget.style.borderColor = LINE; e.currentTarget.style.color = TEXT2; }}
+            >
+              <span>{x.icon}</span>{x.category}
+            </button>
+          ))}
+        </div>
+
+        <div style={{ display: "flex", alignItems: "center", gap: 12, borderTop: `1px solid ${LINE}`, paddingTop: 16 }}>
+          <span style={{ fontSize: 11, color: MID }}>⌘ / Ctrl + Enter to create</span>
+          <span style={{ flex: 1 }} />
+          <button onClick={onClose} style={{ padding: "9px 14px", borderRadius: 9, background: "transparent", border: `1px solid ${LINE_MID}`, color: TEXT2, fontSize: 13, cursor: "pointer" }}>Cancel</button>
           <button
-            onClick={() => setShowPresets(x => !x)}
+            onClick={onSubmit}
+            disabled={submitting || !value.trim()}
             style={{
-              background: "transparent", border: "none", cursor: "pointer",
-              color: MID, fontSize: 11, padding: "2px 6px", borderRadius: 4,
-              display: "flex", alignItems: "center", gap: 3,
+              padding: "9px 18px", borderRadius: 9, background: ACCENT, color: INK, border: "none",
+              fontWeight: 600, fontSize: 13, cursor: submitting || !value.trim() ? "not-allowed" : "pointer",
+              opacity: submitting || !value.trim() ? 0.5 : 1, boxShadow: `0 4px 14px -4px ${ACCENT_GLOW}`,
             }}
           >
-            Examples <ChevronDown size={10} />
+            {submitting ? "Creating…" : "Create agent →"}
           </button>
         </div>
       </div>
-      <button
-        onClick={onSubmit}
-        disabled={submitting || !value.trim()}
-        style={{
-          padding: "10px 16px", borderRadius: 10,
-          background: ACCENT, color: INK, border: "none",
-          fontWeight: 600, fontSize: 13, cursor: submitting ? "not-allowed" : "pointer",
-          opacity: submitting || !value.trim() ? 0.5 : 1,
-          whiteSpace: "nowrap",
-          boxShadow: `0 4px 12px -4px ${ACCENT_GLOW}`,
-        }}
-      >
-        {submitting ? "Creating…" : "Create agent →"}
-      </button>
     </div>
   );
 }

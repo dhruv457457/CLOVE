@@ -27,12 +27,27 @@ import { decodeDelegations } from "@metamask/smart-accounts-kit/utils";
 import { encodeFunctionData, parseUnits, type Hex } from "viem";
 import { TOKENS, CHAIN } from "@/lib/protocols/addresses";
 
-// ── Relayer constants (Base mainnet, from relayer_getCapabilities) ─────────────
+// ── Relayer constants (per-chain, from relayer_getCapabilities) ────────────────
 const RELAYER_URL        = "https://relayer.1shotapi.com/relayers";
-const RELAYER_TARGET     = "0x26a529124f0bbf9af9d8f9f84a43efe47cf1199a" as `0x${string}`;
 const FEE_COLLECTOR      = "0xE936e8FAf4A5655469182A49a505055B71C17604" as `0x${string}`;
-const USDC               = TOKENS.USDC[CHAIN.BASE] as `0x${string}`;
 const BASE_CHAIN_ID      = 8453;
+const POLYGON_CHAIN_ID   = 137;
+
+/** Per-chain relayer config. targetAddress + fee token differ per chain. */
+const RELAYER_CHAINS: Record<number, { target: `0x${string}`; usdc: `0x${string}` }> = {
+  [BASE_CHAIN_ID]: {
+    target: "0x26a529124f0bbf9af9d8f9f84a43efe47cf1199a",
+    usdc:   TOKENS.USDC[CHAIN.BASE] as `0x${string}`,
+  },
+  [POLYGON_CHAIN_ID]: {
+    target: "0x38663d5e9d7b930bea883d27ea13e731242865fa",
+    usdc:   "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359", // native USDC on Polygon
+  },
+};
+
+// Back-compat default (Base).
+const RELAYER_TARGET = RELAYER_CHAINS[BASE_CHAIN_ID].target;
+const USDC           = RELAYER_CHAINS[BASE_CHAIN_ID].usdc;
 // Floor only — the real fee comes from the relayer's live quote (relayer_getFeeData).
 // Base L2 gas is tiny; the relayer's minFee is ~0.01 USDC. We charge the quoted
 // minFee with a small buffer, never a fixed inflated amount.
@@ -82,11 +97,12 @@ interface RelayerFeeData {
   context:   string;
 }
 
-/** Fetch fresh fee quote for USDC on Base mainnet. */
-export async function getRelayerFeeData(): Promise<RelayerFeeData> {
+/** Fetch fresh fee quote for the relayer's USDC on the given chain (default Base). */
+export async function getRelayerFeeData(chainId: number = BASE_CHAIN_ID): Promise<RelayerFeeData> {
+  const cfg = RELAYER_CHAINS[chainId] ?? RELAYER_CHAINS[BASE_CHAIN_ID];
   const result = await rpc("relayer_getFeeData", {
-    chainId: String(BASE_CHAIN_ID),
-    token:   USDC,
+    chainId: String(chainId),
+    token:   cfg.usdc,
   });
   return result as RelayerFeeData;
 }
@@ -138,6 +154,8 @@ export interface RelayExecutionParams {
   workExecutions?: RelayWorkExecution[];
   /** Human-readable memo (for debugging) */
   memo?: string;
+  /** Chain to execute on. 8453 = Base (default), 137 = Polygon (Polymarket). */
+  chainId?: number;
 }
 
 export interface RelayExecutionResult {
@@ -173,10 +191,14 @@ export async function executeViaPublicRelayer(
     recipient,
     workAmountUsdc,
     memo = "CLOVE agent execution",
+    chainId = BASE_CHAIN_ID,
   } = params;
 
+  const chainCfg = RELAYER_CHAINS[chainId] ?? RELAYER_CHAINS[BASE_CHAIN_ID];
+  const usdc     = chainCfg.usdc;
+
   // ── 1. Parse the fee ───────────────────────────────────────────────────────
-  const feeData    = await getRelayerFeeData();
+  const feeData    = await getRelayerFeeData(chainId);
   const minFeeRaw  = feeData.minFee ?? "0";
   const minFeeUsdc = minFeeRaw.includes(".") ? Number(minFeeRaw) : Number(minFeeRaw) / 1e6;
   // Charge the relayer's quoted minFee + small buffer, floored at 0.01 — not a fixed 0.05.
@@ -214,13 +236,13 @@ export async function executeViaPublicRelayer(
   const workCalldata = encodeFunctionData({ abi: erc20Abi, functionName: "transfer", args: [recipient,    workAtoms] });
 
   const executions = [
-    { target: USDC, value: "0", data: feeCalldata  }, // relayer gas fee in USDC
-    { target: USDC, value: "0", data: workCalldata }, // USDC→recipient (contract or user)
+    { target: usdc, value: "0", data: feeCalldata  }, // relayer gas fee in USDC
+    { target: usdc, value: "0", data: workCalldata }, // USDC→recipient (contract or user)
   ];
 
   // ── 4. Submit to relayer ──────────────────────────────────────────────────
   const sendParams = {
-    chainId: String(BASE_CHAIN_ID),
+    chainId: String(chainId),
     ...(feeData.context ? { context: feeData.context } : {}),
     transactions: [{ permissionContext, executions }],
     memo,
