@@ -346,11 +346,14 @@ export async function POST(request: NextRequest) {
 
         if (relaySuccess) {
           const forwardTx = await forwardToProtocol(walletAddress as `0x${string}`, protocolName, defaultAmount);
+          const { resolveReceivedToken } = await import("@/lib/web3/cloveAutoDeposit");
+          const receiptToken = await resolveReceivedToken(forwardTx, walletAddress as `0x${string}`);
           return NextResponse.json({
             submitted: true, txHash: forwardTx, relayTxHash: relayResult.txHash,
             taskId: relayResult.taskId, action: actionKey, protocol,
             contractAddress: autoDepositContract, amount: defaultAmount.toString(),
             feeUsdc: relayResult.feeUsdc, via: "clove-auto-deposit",
+            receiptToken, receivedAmount: receiptToken?.amount ?? (Number(defaultAmount) / 1e6).toString(),
           });
         }
 
@@ -359,11 +362,14 @@ export async function POST(request: NextRequest) {
         console.warn("[execute/defi] Relayer status failed — checking contract balance...");
         try {
           const forwardTx = await forwardToProtocol(walletAddress as `0x${string}`, protocolName, defaultAmount);
+          const { resolveReceivedToken } = await import("@/lib/web3/cloveAutoDeposit");
+          const receiptToken = await resolveReceivedToken(forwardTx, walletAddress as `0x${string}`);
           return NextResponse.json({
             submitted: true, txHash: forwardTx, taskId: relayResult.taskId,
             action: actionKey, protocol, contractAddress: autoDepositContract,
             amount: defaultAmount.toString(), feeUsdc: relayResult.feeUsdc,
             via: "clove-auto-deposit-recovered",
+            receiptToken, receivedAmount: receiptToken?.amount ?? (Number(defaultAmount) / 1e6).toString(),
           });
         } catch (fwdErr) {
           console.warn("[execute/defi] forward() also failed:", fwdErr instanceof Error ? fwdErr.message : fwdErr);

@@ -68,7 +68,7 @@ function formatSpending(s: NonNullable<TelegramRequest["richReport"]>["spending"
   const fmt = (n: number) => n.toFixed(3);
   return [
     "💸 *Spending breakdown*",
-    `\`x402 fees:\`   ${fmt(s.x402Total)} USDC`,
+    `\`Intel fees:\`  ${fmt(s.x402Total)} USDC`,
     `\`Deployed:\`    ${fmt(s.defi)} USDC`,
     `\`Remaining:\`   ${fmt(s.remaining)} / ${s.budget} USDC`,
   ].join("\n");

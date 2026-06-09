@@ -833,7 +833,7 @@ Execute via executeDefi now. Then notify the user.`,
 // ── Tool definitions subset (copied from tools.ts to avoid circular imports) ───
 
 const TOOL_DEFS: OpenAI.Chat.ChatCompletionTool[] = [
-  { type: "function", function: { name: "checkYields",  description: "Fetch live DeFi yields + market news. Pays 0.01 USDC via x402.",             parameters: { type: "object", properties: { protocols: { type: "array", items: { type: "string" } } } } } },
+  { type: "function", function: { name: "checkYields",  description: "Fetch live DeFi yields + market news across supported protocols.",             parameters: { type: "object", properties: { protocols: { type: "array", items: { type: "string" } } } } } },
   { type: "function", function: { name: "checkRisk",    description: "Classify market risk (LOW/MEDIUM/HIGH) using web search.",                    parameters: { type: "object", required: ["context"], properties: { context: { type: "string" } } } } },
   { type: "function", function: { name: "executeDefi",  description: "Deposit/swap/stake on a DeFi protocol using ERC-7715 delegation via 1Shot.", parameters: { type: "object", required: ["protocol","amount","reasoning"], properties: { protocol: { type: "string", enum: ["morpho","uniswap","aerodrome","lido","aave"] }, action: { type: "string", enum: ["deposit","swap","stake","supply","lp"] }, amount: { type: "string" }, reasoning: { type: "string" } } } } },
   { type: "function", function: { name: "notifyUser",   description: "Send a Telegram update. ALWAYS the last tool call.",                          parameters: { type: "object", required: ["message"], properties: { message: { type: "string" } } } } },

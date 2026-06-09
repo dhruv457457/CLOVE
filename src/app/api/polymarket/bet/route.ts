@@ -62,19 +62,11 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "marketId, outcome, sizeUsdc required" }, { status: 400 });
   }
 
-  const apiKey      = process.env.POLYMARKET_API_KEY;
-  const apiSecret   = process.env.POLYMARKET_API_SECRET;
-  const apiPassphrase = process.env.POLYMARKET_PASSPHRASE;   // CLOB needs the full key/secret/passphrase trio
-  const builderCode = process.env.POLYMARKET_BUILDER_CODE;   // optional fee-attribution
-  const walletId    = process.env.ONESHOT_POLYGON_WALLET_ID ?? process.env.ONESHOT_WALLET_ID;
-
   const hasRealPerm =
     !!body.permissionsContext &&
     body.permissionsContext.length > 40 &&
     !body.permissionsContext.includes("demo") &&
     body.permissionsContext.startsWith("0x");
-
-  const canExecuteLive = !!(apiKey && apiSecret && apiPassphrase && walletId && hasRealPerm && body.clobTokenId);
 
   let status: PolymarketBet["status"] = "prepared";
   let via    = "prepared";
@@ -89,7 +81,13 @@ export async function POST(request: NextRequest) {
   if (hasRealPerm) {
     try {
       const { executeViaPublicRelayer } = await import("@/lib/oneshot/publicRelayer");
-      const recipient = (process.env.NEXT_PUBLIC_CLOVE_SESSION_ADDRESS ?? "0x") as `0x${string}`;
+      // Collateral must land with the trader that signs the CLOB order, so it
+      // can fund the bet. Fall back to the relayer/session address if no key.
+      let recipient = (process.env.NEXT_PUBLIC_CLOVE_SESSION_ADDRESS ?? "0x") as `0x${string}`;
+      try {
+        const { getPolymarketTraderAddress } = await import("@/lib/polymarket/clob");
+        recipient = getPolymarketTraderAddress();
+      } catch { /* no trader key — keep fallback */ }
       const r = await executeViaPublicRelayer({
         userPermissionsContext: body.permissionsContext!,
         recipient,
@@ -110,55 +108,36 @@ export async function POST(request: NextRequest) {
     }
   }
 
-  // Only attempt the (legacy, often-unavailable) 1Shot CLOB path if the real
-  // redemption above didn't already execute — never downgrade a good tx.
-  if (canExecuteLive && status !== "submitted") {
+  // ── REAL CLOB order via @polymarket/clob-client ────────────────────────────
+  // Once collateral is in the trading account, sign + post the actual order to
+  // Polymarket's order book. We attempt this whenever we have a token id and a
+  // trader key — independent of the relayer move (the move funds it; the CLOB
+  // order is the bet itself). A geo-block surfaces as a clear error.
+  const traderKeyPresent = !!(process.env.POLYMARKET_PK || process.env.CLOVE_SESSION_KEY);
+  if (body.clobTokenId && traderKeyPresent) {
     try {
-      // 1Shot signs the CLOB order on Polygon under the user's delegation.
-      // Polymarket's CLOB accepts EIP-712 signed orders; 1Shot produces the
-      // signature scoped by the ERC-7710 caveat (max spend).
-      const tokenRes = await fetch("https://api.1shotapi.com/v0/token", {
-        method:  "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body:    new URLSearchParams({
-          grant_type:    "client_credentials",
-          client_id:     process.env.ONESHOT_API_KEY ?? "",
-          client_secret: process.env.ONESHOT_API_SECRET ?? "",
-        }),
-        signal: AbortSignal.timeout(8000),
+      const { placeClobOrder } = await import("@/lib/polymarket/clob");
+      const order = await placeClobOrder({
+        tokenID: body.clobTokenId,
+        price:   body.price,
+        size:    body.sizeUsdc,
+        side:    "BUY",
+        type:    "limit",
       });
-      if (!tokenRes.ok) throw new Error(`1Shot token ${tokenRes.status}`);
-      const { access_token } = await tokenRes.json() as { access_token: string };
-
-      // Submit the order intent to Polymarket CLOB via 1Shot's Polygon wallet.
-      const orderRes = await fetch(
-        `https://api.1shotapi.com/v0/wallets/${walletId}/polymarket/order`,
-        {
-          method:  "POST",
-          headers: { Authorization: `Bearer ${access_token}`, "Content-Type": "application/json" },
-          body:    JSON.stringify({
-            tokenID:              body.clobTokenId,
-            price:                body.price,
-            size:                 body.sizeUsdc,
-            side:                 "BUY",
-            delegationData:       body.permissionsContext,
-            polymarketApiKey:     apiKey,
-            polymarketSecret:     apiSecret,
-            polymarketPassphrase: apiPassphrase,
-            ...(builderCode ? { builderCode } : {}),
-          }),
-          signal: AbortSignal.timeout(20000),
-        }
-      );
-      if (!orderRes.ok) throw new Error(`CLOB order ${orderRes.status}: ${await orderRes.text()}`);
-      const order = await orderRes.json() as { txHash?: string; orderId?: string };
-      txHash = order.txHash;
-      status = "submitted";
-      via    = "1shot-polygon";
+      if (order.success) {
+        status = "open";                 // order resting / matched on the book
+        via    = "polymarket-clob";
+        txHash = order.txHashes?.[0] ?? txHash;
+        error  = undefined;
+      } else {
+        // Collateral may have moved (status "submitted") but the order didn't
+        // rest — keep the truthful state and report why (e.g. geo block).
+        error = order.error ?? "CLOB order was not accepted";
+        if (status !== "submitted") { status = "prepared"; via = "prepared-fallback"; }
+      }
     } catch (e) {
-      error  = e instanceof Error ? e.message : String(e);
-      status = "prepared";  // fall back to recording intent
-      via    = "prepared-fallback";
+      error = e instanceof Error ? e.message : String(e);
+      if (status !== "submitted") { status = "prepared"; via = "prepared-fallback"; }
     }
   }
 

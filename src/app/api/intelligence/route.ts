@@ -3,18 +3,15 @@ import { analyzeYieldsWithVenice } from "@/lib/venice/analyst";
 import { searchCryptoYields, searchCryptoNews } from "@/lib/tavily/client";
 import { searchProtocolYields } from "@/lib/exa/client";
 import { intelligenceCache, INTELLIGENCE_TTL_MS } from "@/lib/agent/cache";
-import { build402, verifyPayment } from "@/lib/x402/helpers";
-import { X402_PRICES } from "@/lib/config/env";
+import { isInternalRequest } from "@/lib/auth/internal";
 
-const PRICE_USDC = X402_PRICES.intelligence;
 const PROTOCOLS = ["Morpho", "Uniswap", "Aerodrome", "Lido", "Aave"];
 
 export async function GET(request: NextRequest) {
-  const paymentSig = request.headers.get("PAYMENT-SIGNATURE");
-  if (!paymentSig) return build402(PRICE_USDC);
-
-  const valid = await verifyPayment(paymentSig);
-  if (!valid) return NextResponse.json({ error: "Invalid payment" }, { status: 402 });
+  // Internal endpoint — called by the agent runtime, not users.
+  if (!isInternalRequest(request)) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
 
   // ── Cache hit? Return same intel for 5 min — DeFi yields don't change faster ──
   // Key by 5-minute UTC bucket so a bad/stale response only poisons the current
@@ -95,9 +92,6 @@ export async function GET(request: NextRequest) {
     yields,
 
     _clove: {
-      paid: true,
-      costUsdc: PRICE_USDC,
-      via: "x402 + ERC-7710",
       sources,
       source: "defillama",
       timestamp: Date.now(),
@@ -109,7 +103,5 @@ export async function GET(request: NextRequest) {
     intelligenceCache.set(CACHE_KEY, response, INTELLIGENCE_TTL_MS);
   }
 
-  return NextResponse.json(response, {
-    headers: { "Access-Control-Expose-Headers": "PAYMENT-REQUIRED, PAYMENT-RESPONSE" },
-  });
+  return NextResponse.json(response);
 }
