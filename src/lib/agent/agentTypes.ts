@@ -67,33 +67,7 @@ Call checkYields to fetch live APY, checkRisk to validate, then executeDefi to d
 Never exceed your budget. Report via notifyUser when done.`,
   },
 
-  // ── 2. Polymarket prediction-market bettor (Polygon) ─────────────────────────
-  polymarket: {
-    type:        "polymarket",
-    label:       "Polymarket Agent",
-    emoji:       "🎲",
-    tagline:     "Bets on prediction markets where it has an edge",
-    chainId:     CHAIN.POLYGON,
-    chainName:   "Polygon",
-    tools:       ["checkPolymarketMarkets", "assessProbability", "checkRisk", "placePolymarketBet", "notifyUser", "addThought"],
-    dataSources: ["Polymarket Gamma API", "Polymarket CLOB", "Venice web search"],
-    defaultBudget: "20",
-    defaultIntervalMs: 6 * HOUR,
-    systemPrompt:
-      `You are {name}, an autonomous prediction-market agent on Polymarket (Polygon). Budget: {budget} USDC.
-Config: {config}
-
-CRITICAL — you must reason BEFORE you see the crowd's price, so you don't just echo it back:
-1. Call checkPolymarketMarkets. Prices are HIDDEN on purpose — you only get the questions.
-2. For each interesting question, think it through (use checkRisk / web research) and form your OWN probability estimate.
-3. Call assessProbability with your committed estimate. ONLY THEN do you see the market price and your edge.
-4. If — and only if — the edge clears the threshold, call placePolymarketBet (it re-checks the edge and rejects no-edge bets). Size proportionally to confidence and budget.
-5. notifyUser with your estimate, the market price, and the edge that justified the bet.
-
-Pass on markets where your estimate matches the crowd. Most markets are efficiently priced — your job is to find the few that aren't.`,
-  },
-
-  // ── 3. Alpha copy-trader (Base) ──────────────────────────────────────────────
+  // ── 2. Alpha copy-trader (Base) ──────────────────────────────────────────────
   "copy-trader": {
     type:        "copy-trader",
     label:       "Copy Trade Agent",
@@ -210,7 +184,6 @@ export function buildTypeSystemPrompt(
  */
 export function inferAgentType(prompt: string): AgentType {
   const p = prompt.toLowerCase();
-  if (/(polymarket|prediction market|bet on|odds|election|will .* win|probability of)/.test(p)) return "polymarket";
   if (/(copy trade|copy trading|mirror|whale|smart money|follow .* wallet|track .* trader)/.test(p)) return "copy-trader";
   if (/(narrative|trending|meme|hype|momentum|twitter|social|going viral|early)/.test(p)) return "narrative";
   if (/(rebalanc|reallocat|optimi[sz]e .*portfolio|monitor .*position|best yield across)/.test(p)) return "rebalancer";

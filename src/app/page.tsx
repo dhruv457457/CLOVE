@@ -14,10 +14,8 @@ const PROTOCOLS: { name: string; color: string; logo: React.ReactNode }[] = [
   { name: "Uniswap",    color: "#FF007A", logo: <UniswapLogo /> },
   { name: "Aerodrome",  color: "#0F62FE", logo: <AerodromeLogo /> },
   { name: "Lido",       color: "#00A3FF", logo: <LidoLogo /> },
-  { name: "Polymarket", color: "#1652F0", logo: <PolymarketLogo /> },
   { name: "Venice AI",  color: "#8B6BFF", logo: <VeniceLogo /> },
   { name: "Base",       color: "#0052FF", logo: <BaseLogo /> },
-  { name: "Polygon",    color: "#7B3FE4", logo: <PolygonLogo /> },
   { name: "MetaMask",   color: "#F6851B", logo: <MetaMaskLogo /> },
   { name: "1Shot",      color: "#C8FF3D", logo: <OneShotLogo /> },
 ];
@@ -172,7 +170,7 @@ export default function LandingPage() {
             >
               Live
             </span>
-            <span>ERC-7715 · ERC-7710 · 1Shot Relayer · Base + Polygon</span>
+            <span>ERC-7715 · ERC-7710 · 1Shot Relayer · Base mainnet</span>
             <span className="h-2.5 w-px" style={{ background: "rgba(14,15,12,0.12)" }} />
             <span>Network active · 24/7</span>
           </div>
@@ -293,7 +291,6 @@ export default function LandingPage() {
               { name: "1Shot API",  desc: "Permissionless relayer (ERC-7710)", color: "#C8FF3D", logo: <OneShotLogo />, dark: true },
               { name: "Venice AI",  desc: "Private LLM + embeddings",  color: "#8B6BFF", logo: <VeniceLogo /> },
               { name: "Base",       desc: "L2 execution layer",        color: "#0052FF", logo: <BaseLogo /> },
-              { name: "Polygon",    desc: "Polymarket execution",      color: "#7B3FE4", logo: <PolygonLogo /> },
             ].map((api) => (
               <div
                 key={api.name}
@@ -540,7 +537,7 @@ export default function LandingPage() {
               <CloverMark /> CLOVE
             </div>
             <p className="text-[13px] max-w-[32ch] leading-[1.55] mt-3" style={{ color: "#6B6A60" }}>
-              Autonomous DeFi agent OS. Built on Base + Polygon. Powered by MetaMask Advanced Permissions, 1Shot, and Venice AI.
+              Autonomous DeFi agent OS. Built on Base. Powered by MetaMask Advanced Permissions, 1Shot, and Venice AI.
             </p>
           </div>
           <div className="flex flex-wrap gap-[60px]">
@@ -1488,20 +1485,3 @@ function AaveLogo() {
   );
 }
 
-function PolymarketLogo() {
-  return (
-    <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
-      <rect x="2.5" y="2.5" width="13" height="13" rx="3" stroke="white" strokeWidth="1.3" opacity="0.85" />
-      <path d="M6 11L8 7L10 9.5L12.5 6" stroke="white" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-function PolygonLogo() {
-  return (
-    <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
-      <path d="M9 3L14.5 6.2V12.8L9 16L3.5 12.8V6.2L9 3Z" stroke="white" strokeWidth="1.2" opacity="0.85" />
-      <path d="M9 6.5L11.8 8.1V11.3L9 12.9L6.2 11.3V8.1L9 6.5Z" fill="white" opacity="0.7" />
-    </svg>
-  );
-}

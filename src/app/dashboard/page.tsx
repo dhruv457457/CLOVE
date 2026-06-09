@@ -18,7 +18,7 @@ import {
 import "@xyflow/react/dist/style.css";
 import {
   Plus, LayoutDashboard, Workflow as WorkflowIcon, BarChart2,
-  DollarSign, BookUser, Sparkles, Shield, ChevronDown, X, Clock,
+  DollarSign, BookUser, Sparkles, Shield, ChevronDown, X, Clock, Trash2,
 } from "lucide-react";
 import { metamaskStore } from "@/lib/web3/metamaskStore";
 import type { MediaPolicy } from "@/lib/agent/agents";
@@ -553,6 +553,7 @@ export default function DashboardPage() {
   // empty-state CTA open it (works regardless of whether the canvas has agents).
   const [createOpen, setCreateOpen] = useState(false);
   const openCreate = useCallback(() => setCreateOpen(true), []);
+  const [deletingWf, setDeletingWf] = useState(false);
 
   // UX-1: In-UI toast system — replaces all alert()/confirm() calls
   const [toasts, setToasts] = useState<Array<{ id: string; msg: string; type: "success"|"error"|"info" }>>([]);
@@ -645,6 +646,29 @@ const loadAgents = useCallback(async () => {
     if (activeWorkflowId && workflowList.some(w => w.id === activeWorkflowId)) return activeWorkflowId;
     return workflowList[0]?.id ?? null;
   }, [activeWorkflowId, workflowList]);
+
+  // One-click delete of the whole active workflow (cascades to its agents).
+  const deleteActiveWorkflow = useCallback(() => {
+    const wfId = effectiveWorkflowId;
+    if (!wfId || wfId === "__solo__") { toast("Select a workflow to delete.", "info"); return; }
+    const wfName = workflowList.find(w => w.id === wfId)?.label ?? "this workflow";
+    setConfirmState({
+      msg: `Delete "${wfName}" and ALL its agents? This can't be undone.`,
+      onOk: async () => {
+        setConfirmState(null);
+        setDeletingWf(true);
+        try {
+          const res = await fetch(`/api/workflow/${wfId}`, { method: "DELETE" });
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          setActiveWorkflowId(null);
+          await loadAgents();
+          toast("Workflow deleted ✓", "success");
+        } catch (e) {
+          toast("Delete failed: " + (e instanceof Error ? e.message : String(e)), "error");
+        } finally { setDeletingWf(false); }
+      },
+    });
+  }, [effectiveWorkflowId, workflowList, loadAgents, toast]);
 
   // Only the active workflow's agents are on the canvas (no more pile-up).
   const visibleAgents = useMemo(() => {
@@ -1102,6 +1126,26 @@ const loadAgents = useCallback(async () => {
             ))}
           </select>
         )}
+
+        {/* One-click delete of the whole active workflow */}
+        {effectiveWorkflowId && effectiveWorkflowId !== "__solo__" && (
+          <button
+            onClick={deleteActiveWorkflow}
+            disabled={deletingWf}
+            title="Delete this whole workflow and its agents"
+            style={{
+              marginLeft: 8, display: "inline-flex", alignItems: "center", gap: 5,
+              padding: "4px 9px", borderRadius: 6, background: "transparent",
+              border: `1px solid rgba(255,138,102,0.3)`, color: "#FF8A66",
+              fontSize: 11, cursor: deletingWf ? "not-allowed" : "pointer", opacity: deletingWf ? 0.6 : 1,
+            }}
+            onMouseEnter={(e) => { if (!deletingWf) e.currentTarget.style.background = "rgba(255,138,102,0.08)"; }}
+            onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
+          >
+            <Trash2 size={12} /> {deletingWf ? "Deleting…" : "Delete workflow"}
+          </button>
+        )}
+
         <div style={{ flex: 1 }} />
 
         {/* One-click team run */}
@@ -1690,22 +1734,16 @@ function CreatePanel({
   const examples = NL_PRESET_GROUPS.flatMap(g => g.examples.slice(0, 1).map(ex => ({ icon: g.icon, category: g.category, ex })));
   return (
     <div
-      onClick={onClose}
       style={{
-        position: "fixed", inset: 0, zIndex: 600,
-        display: "flex", alignItems: "center", justifyContent: "center",
-        background: "rgba(8,9,7,0.72)", backdropFilter: "blur(8px)",
-        animation: "fadeInUp 0.16s ease",
+        position: "fixed", top: 0, right: 0, bottom: 0, zIndex: 600,
+        width: "min(440px, 94vw)", background: INK_1, borderLeft: `1px solid ${LINE_MID}`,
+        boxShadow: "-16px 0 56px -20px rgba(0,0,0,0.75)",
+        padding: 24, overflowY: "auto",
+        display: "flex", flexDirection: "column", gap: 16,
+        animation: "slideInRight 0.18s cubic-bezier(.2,.85,.25,1)",
       }}
     >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        style={{
-          width: "min(620px, 92vw)", background: INK_1, border: `1px solid ${LINE_MID}`,
-          borderRadius: 18, padding: 26, boxShadow: "0 24px 80px -20px rgba(0,0,0,0.85)",
-          display: "flex", flexDirection: "column", gap: 16,
-        }}
-      >
+      <style>{`@keyframes slideInRight { from { transform: translateX(24px); opacity: 0 } to { transform: translateX(0); opacity: 1 } }`}</style>
         <div style={{ display: "flex", alignItems: "center" }}>
           <span style={{ display: "inline-flex", alignItems: "center", gap: 7, fontSize: 10.5, letterSpacing: "0.14em", textTransform: "uppercase", color: ACCENT }}>
             <Sparkles size={13} /> New agent
@@ -1772,7 +1810,6 @@ function CreatePanel({
             {submitting ? "Creating…" : "Create agent →"}
           </button>
         </div>
-      </div>
     </div>
   );
 }

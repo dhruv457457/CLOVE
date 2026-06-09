@@ -902,29 +902,42 @@ export default function WorkflowDetailPage() {
     setLive(INIT_LIVE);
   };
 
-  // ── Old single-agent run (fallback for non-3-agent workflows) ───────────────
+  // ── Team run — runs EVERY agent in dependency order, sequentially ───────────
+  // Left→right by canvas position: scouts → analyzer → risk → executor. The
+  // Fund Manager (orchestrator) is skipped — it holds the grant, it doesn't run a
+  // reasoning loop. Agents coordinate through shared team memory between runs:
+  // scouts write findings, the analyzer/risk/executor read them. Read-only scouts
+  // (cap 0) run without a spending permission; only the executor transacts.
   const [running, setRunning] = useState<string | null>(null);
   const runSingle = useCallback(async () => {
     if (!workflow || agents.length === 0) return;
-    const trigger = agents.find(a => a.scheduleIntervalMs) ?? agents[agents.length - 1];
-    setRunning(trigger.id);
+    const mm = metamaskStore.getState();
+    const ordered = [...agents]
+      .filter(a => a.name !== "Fund Manager")   // orchestrator holds the grant; doesn't run a loop
+      .sort((a, b) => (a.position?.x ?? 0) - (b.position?.x ?? 0));
     try {
-      const mm = metamaskStore.getState();
-      await fetch("/api/agent/run-stream", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          agentId:            trigger.id,
-          walletAddress:      mm.userAddress,
-          permissionsContext: mm.permission?.permissionsContext,
-          delegationManager:  mm.permission?.delegationManager,
-        }),
-      }).then(r => r.body?.getReader()).then(async (reader) => {
-        if (!reader) return;
-        while (true) { const { done } = await reader.read(); if (done) break; }
-      });
+      for (const a of ordered) {
+        setRunning(a.id);
+        try {
+          const res = await fetch("/api/agent/run-stream", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              agentId:            a.id,
+              walletAddress:      mm.userAddress,
+              permissionsContext: mm.permission?.permissionsContext,
+              delegationManager:  mm.permission?.delegationManager,
+            }),
+          });
+          const reader = res.body?.getReader();
+          if (reader) { while (true) { const { done } = await reader.read(); if (done) break; } }
+        } catch { /* one agent failing shouldn't stop the team */ }
+        await loadWorkflow(); // refresh run counts as each agent finishes
+      }
+    } finally {
+      setRunning(null);
       await Promise.all([loadWorkflow(), loadHistory()]);
-    } finally { setRunning(null); }
+    }
   }, [agents, workflow, loadWorkflow, loadHistory]);
 
   const isOrchestrated = agents.length === 3; // 3-agent workflow = Scout/Risk/Executor

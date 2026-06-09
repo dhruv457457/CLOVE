@@ -12,9 +12,6 @@ const TOOL_DESCRIPTIONS: Record<string, string> = {
   executeDefi:            "deposit / swap / stake on a protocol via ERC-7715 delegation",
   rebalance:              "withdraw from one protocol and deposit into a better one atomically",
   notifyUser:             "send Telegram report (always include as the final subgoal)",
-  checkPolymarketMarkets: "fetch live Polymarket markets — questions only, prices HIDDEN (Gamma API)",
-  assessProbability:      "commit your own probability estimate, then reveal the price + edge (anti-anchoring)",
-  placePolymarketBet:     "place a bet on a Polymarket outcome you've shown has real edge (Polygon)",
   checkWhaleTrades:       "read recent on-chain swaps of tracked smart-money wallets (Basescan)",
   executeCopyTrade:       "mirror a smart-money swap proportionally to your budget",
   checkNarratives:        "find tokens/themes whose social mentions are spiking (Venice web search over X)",
@@ -82,11 +79,6 @@ function planSystemPrompt(memoryPrompt: string, insights: AgentInsight[], agentT
   // Type-specific planning rules. Generic yield/rebalancer keep the original
   // rules; the "true agent" archetypes get rules matching their workflow.
   const rulesByType: Partial<Record<AgentType, string>> = {
-    polymarket:
-`1. Start with checkPolymarketMarkets (prices are hidden — you only get questions).
-2. Plan an assessProbability step: commit your own estimate BEFORE the price is revealed. Never plan placePolymarketBet without an assessProbability before it.
-3. Plan placePolymarketBet only as a conditional follow-up for outcomes with real edge.
-4. Always end with notifyUser. Generate 2–4 subgoals maximum.`,
     "copy-trader":
 `1. Start with checkWhaleTrades to read tracked wallets' recent swaps.
 2. Plan executeCopyTrade ONLY when 2+ wallets converge on the same token (use checkRisk to sanity-check).
@@ -182,15 +174,6 @@ export async function veniceGeneratePlan(
 /** A minimal, valid default plan per agent type (used when the LLM call fails). */
 function fallbackPlan(agentType?: AgentType): Plan {
   switch (agentType) {
-    case "polymarket":
-      return {
-        reasoning: "Default plan: read questions → estimate → reveal edge → bet → notify.",
-        subgoals: [
-          { id: "s1", description: "Read live Polymarket questions (prices hidden)",        tools: ["checkPolymarketMarkets"] },
-          { id: "s2", description: "Commit my own estimate and reveal the edge",            tools: ["assessProbability"] },
-          { id: "s3", description: "Bet only outcomes with real edge, then report",         tools: ["placePolymarketBet", "notifyUser"] },
-        ],
-      };
     case "copy-trader":
       return {
         reasoning: "Default plan: read whale trades → copy convergence → notify.",

@@ -366,51 +366,41 @@ export async function requestRelayerPermission(
 }
 
 /**
- * Request a Polygon ERC-7715 permission specifically for the Polymarket agent.
+ * Request an ERC-7715 permission for CLOVE's FUND MANAGER (A2A rewire).
  *
- * Uses chainId 137 (Polygon) so the agent can place CLOB bets on Polymarket
- * using ERC-7710 delegation redemption — the same MetaMask DelegationManager
- * is deployed on Polygon at 0xdb9B1e94B5b69Df7e401DDbedE43491141047dB3.
+ * Grants a USDC periodic spending permission TO CLOVE's REAL session smart
+ * account (the Fund Manager, owned by CLOVE_SESSION_KEY) instead of straight to
+ * the relayer. The Fund Manager then redelegates SCOPED, CAPPED slices to each
+ * worker:
  *
- * This makes Polymarket the ONLY agent in CLOVE that uses cross-chain ERC-7715:
- * all other agents run on Base (8453); Polymarket runs on Polygon (137).
+ *     user ──grant──▶ Fund Manager ──redelegate(cap)──▶ Worker ──hop──▶ Relayer
+ *
+ * Each worker's slice carries an ERC20TransferAmountEnforcer caveat, so a worker
+ * that tries to spend past its cap REVERTS on-chain — the real A2A proof.
+ *
+ * IMPORTANT: this MUST use the ERC-7715 `requestExecutionPermissions` path (via
+ * requestUsdcPermission), NOT manual EIP-712 signDelegation. Modern MetaMask
+ * rejects raw delegation signatures from its own accounts with
+ * "External signature requests cannot sign delegations for internal accounts."
+ * The Advanced-Permissions flow is the sanctioned way to authorize a delegate.
+ *
+ * The erc20-token-periodic grant authorizes USDC.transfer — which is exactly
+ * what the relayer redemption bundle does (fee + work transfers), so it's
+ * consistent with the existing execution model.
+ *
+ * @param fundManagerAddress  CLOVE session account from GET /api/session/address?role=fund-manager
  */
-export async function requestPolymarketPermission(
+export async function requestFundManagerPermission(
+  fundManagerAddress: `0x${string}`,
   budgetUsdc: string,
   periodDays: number,
 ): Promise<GrantedPermission> {
-  // Switch MetaMask to Polygon first
-  try {
-    await window.ethereum?.request({
-      method: "wallet_switchEthereumChain",
-      params: [{ chainId: "0x89" }], // 0x89 = 137 (Polygon)
-    });
-  } catch (switchErr: unknown) {
-    // Chain not added yet — add it
-    if ((switchErr as { code?: number })?.code === 4902) {
-      await window.ethereum?.request({
-        method: "wallet_addEthereumChain",
-        params: [{
-          chainId: "0x89",
-          chainName: "Polygon Mainnet",
-          nativeCurrency: { name: "MATIC", symbol: "MATIC", decimals: 18 },
-          rpcUrls: ["https://polygon-rpc.com"],
-          blockExplorerUrls: ["https://polygonscan.com"],
-        }],
-      });
-    } else throw switchErr;
-  }
-
-  // 1Shot Public Relayer target on POLYGON (from relayer_getCapabilities(137)).
-  // This is per-chain — Base is 0x26a5…, Polygon is 0x3866…. The grant must
-  // delegate to the chain's relayer target or redemption fails.
-  const POLYGON_RELAYER = "0x38663d5e9d7b930bea883d27ea13e731242865fa" as `0x${string}`;
   return requestUsdcPermission(
-    POLYGON_RELAYER,
+    fundManagerAddress,
     budgetUsdc,
     periodDays,
-    "CLOVE Polymarket agent — places prediction market bets on Polygon",
-    POLYGON_CHAIN_ID,
+    "CLOVE Fund Manager — splits this budget into capped, revocable worker agents",
+    CHAIN.id,
   );
 }
 

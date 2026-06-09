@@ -10,7 +10,8 @@ import { getAgent, type AgentLastAction } from "@/lib/agent/agents";
  * We show how busy the agent is and where the budget went. That's it.
  */
 export interface AgentStats {
-  address:             string;       // the 1Shot wallet (on-chain agent identity)
+  address:             string;       // the agent's derived delegate key (signs delegations; holds no funds)
+  lastTxHash:          string | null; // most recent on-chain execution tx (the real activity)
   totalRuns:           number;       // total cycles (plan + execute combined)
   totalExecuted:       number;       // count of runs that produced an on-chain tx
   totalX402SpentUsdc:  number;
@@ -61,8 +62,29 @@ export async function getAgentStats(agentId: string): Promise<AgentStats | null>
   const budgetN = Number.parseFloat(agent.budgetUsdc || "0") || 0;
   const utilization = budgetN > 0 ? Math.min(100, (agent.budgetUsedUsdc / budgetN) * 100) : 0;
 
+  // Each agent's OWN derived delegate identity (deterministic from root key +
+  // agentId). NOTE: this address signs the scoped delegation but holds no funds
+  // and sends no txs — funds move from the user's wallet → relayer → protocol
+  // (non-custodial). The REAL on-chain activity is the execution txHash below.
+  let agentAddress = process.env.NEXT_PUBLIC_CLOVE_SESSION_ADDRESS ?? "0x";
+  try {
+    const { getAgentEoaAddress } = await import("@/lib/web3/serverSession");
+    agentAddress = getAgentEoaAddress(agentId);
+  } catch { /* fall back to session address */ }
+
+  // Latest real on-chain execution tx for this agent (from its tool-result thoughts).
+  let lastTxHash: string | null = null;
+  if (db) {
+    const txThought = await db.collection("agent_thoughts")
+      .find({ agentId, "content.txHash": { $exists: true, $ne: null } })
+      .sort({ _id: -1 }).limit(1).toArray();
+    const h = txThought[0]?.content?.txHash;
+    if (typeof h === "string" && /^0x[0-9a-fA-F]{64}$/.test(h)) lastTxHash = h;
+  }
+
   return {
-    address:             process.env.NEXT_PUBLIC_CLOVE_SESSION_ADDRESS ?? "0x",
+    address:             agentAddress,
+    lastTxHash,
     totalRuns:           agent.totalRuns,
     totalExecuted:       agent.totalExecuted,
     totalX402SpentUsdc:  agent.x402SpentUsdc,

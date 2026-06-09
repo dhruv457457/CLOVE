@@ -1,5 +1,5 @@
 import "server-only";
-import { createWalletClient, createPublicClient, http, encodeFunctionData } from "viem";
+import { createWalletClient, createPublicClient, http, encodeFunctionData, parseAbi, formatUnits } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { base } from "viem/chains";
 import { getSessionPrivateKey } from "@/lib/config/env";
@@ -60,6 +60,58 @@ const CLOVE_AUTO_DEPOSIT_ABI = [
 
 const RPC = process.env.BASE_RPC ?? "https://mainnet.base.org";
 
+// keccak256("Transfer(address,address,uint256)")
+const TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+const ERC20_META_ABI = parseAbi([
+  "function symbol() view returns (string)",
+  "function name() view returns (string)",
+  "function decimals() view returns (uint8)",
+]);
+
+export interface ReceivedToken {
+  symbol:  string;
+  name:    string;
+  address: `0x${string}`;
+  amount:  string;   // human-readable, decimals-adjusted
+}
+
+/**
+ * Resolve the ACTUAL token a user received in a transaction — by reading the
+ * ERC-20 Transfer logs (to == user) from the tx receipt and the token's own
+ * symbol/name/decimals. Works for ANY protocol/vault/swap output (mwUSDC,
+ * aBasUSDC, or an arbitrary token from a Uniswap/Aerodrome swap) — no hardcoded
+ * map. Returns the last token credited to the user (the final output).
+ */
+export async function resolveReceivedToken(
+  txHash: `0x${string}`,
+  user:   `0x${string}`,
+): Promise<ReceivedToken | null> {
+  const pub = createPublicClient({ chain: base, transport: http(RPC) });
+  let receipt;
+  try { receipt = await pub.getTransactionReceipt({ hash: txHash }); }
+  catch { return null; }
+  if (receipt.status !== "success") return null;
+
+  const userTopic = ("0x" + user.toLowerCase().slice(2).padStart(64, "0"));
+  const credited = receipt.logs.filter(
+    l => l.topics[0]?.toLowerCase() === TRANSFER_TOPIC && l.topics[2]?.toLowerCase() === userTopic,
+  );
+  if (credited.length === 0) return null;
+
+  // The final credited token is the position/output the user actually holds.
+  const log   = credited[credited.length - 1];
+  const token = log.address as `0x${string}`;
+  let raw = 0n;
+  try { raw = BigInt(log.data); } catch { /* keep 0 */ }
+
+  let symbol = "TOKEN", name = "", decimals = 18;
+  try { symbol   = await pub.readContract({ address: token, abi: ERC20_META_ABI, functionName: "symbol"   }) as string; } catch { /* */ }
+  try { name     = await pub.readContract({ address: token, abi: ERC20_META_ABI, functionName: "name"     }) as string; } catch { /* */ }
+  try { decimals = await pub.readContract({ address: token, abi: ERC20_META_ABI, functionName: "decimals" }) as number; } catch { /* */ }
+
+  return { symbol, name, address: token, amount: formatUnits(raw, decimals) };
+}
+
 /**
  * Wait until the CloveAutoDeposit contract holds at least `expectedAtoms` USDC.
  * The relayer tx needs to confirm before we call forward().
@@ -81,6 +133,22 @@ async function waitForUsdcBalance(
     await new Promise(r => setTimeout(r, 3_000));
   }
   return false;
+}
+
+/**
+ * Total USDC (atoms) currently sitting in the CloveAutoDeposit contract —
+ * i.e. funds that were transferred in but not yet forwarded to a protocol.
+ * Used to detect + complete a "stuck" deposit.
+ */
+export async function getContractUsdcBalance(): Promise<bigint> {
+  const contractAddress = process.env.CLOVE_AUTO_DEPOSIT as `0x${string}` | undefined;
+  if (!contractAddress) return 0n;
+  const pub = createPublicClient({ chain: base, transport: http(RPC) });
+  try {
+    return await pub.readContract({
+      address: contractAddress, abi: CLOVE_AUTO_DEPOSIT_ABI, functionName: "usdcBalance",
+    }) as bigint;
+  } catch { return 0n; }
 }
 
 /**
@@ -137,9 +205,21 @@ export async function withdrawFromProtocol(
     args: [user, protocol, amountAtoms],
   });
 
-  const hash = await wallet.sendTransaction({ to: contractAddress, data, gas: 400_000n });
-  console.log(`[cloveAutoDeposit] withdraw() tx: ${hash}`);
-  await pub.waitForTransactionReceipt({ hash });
+  let gas = 800_000n;
+  try {
+    const est = await pub.estimateContractGas({
+      address: contractAddress, abi: CLOVE_AUTO_DEPOSIT_ABI,
+      functionName: "withdraw", args: [user, protocol, amountAtoms], account: signer,
+    });
+    gas = (est * 150n) / 100n;
+  } catch { /* fall back to generous fixed gas */ }
+
+  const hash = await wallet.sendTransaction({ to: contractAddress, data, gas });
+  console.log(`[cloveAutoDeposit] withdraw() tx: ${hash} (gas ${gas})`);
+  const receipt = await pub.waitForTransactionReceipt({ hash });
+  if (receipt.status !== "success") {
+    throw new Error(`withdraw() reverted on-chain (tx ${hash})`);
+  }
   console.log(`[cloveAutoDeposit] Withdrawal confirmed!`);
   return hash;
 }
@@ -174,14 +254,27 @@ export async function forwardToProtocol(
     args:         [user, protocol, amountAtoms],
   });
 
-  const hash = await wallet.sendTransaction({
-    to:   contractAddress,
-    data,
-    gas:  300_000n,  // ~150k actual, 2× headroom
-  });
+  // Estimate gas + 50% buffer (ERC-4626 / Aave deposits run ~385k and vary by
+  // protocol state). A fixed 300k was too low for Morpho → out-of-gas revert.
+  let gas = 800_000n;
+  try {
+    const est = await pub.estimateContractGas({
+      address: contractAddress, abi: CLOVE_AUTO_DEPOSIT_ABI,
+      functionName: "forward", args: [user, protocol, amountAtoms], account: signer,
+    });
+    gas = (est * 150n) / 100n;
+  } catch { /* protocol may revert estimate; fall back to generous fixed gas */ }
 
-  console.log(`[cloveAutoDeposit] forward() tx: ${hash}`);
-  await pub.waitForTransactionReceipt({ hash });
+  const hash = await wallet.sendTransaction({ to: contractAddress, data, gas });
+  console.log(`[cloveAutoDeposit] forward() tx: ${hash} (gas ${gas})`);
+
+  // VERIFY the deposit actually succeeded — waitForTransactionReceipt does NOT
+  // throw on revert, so check status explicitly. Otherwise a reverted tx looks
+  // like a successful deposit while the USDC stays parked in the contract.
+  const receipt = await pub.waitForTransactionReceipt({ hash });
+  if (receipt.status !== "success") {
+    throw new Error(`forward() reverted on-chain — deposit did NOT happen (tx ${hash})`);
+  }
   console.log(`[cloveAutoDeposit] Confirmed! Protocol deposit complete.`);
 
   return hash;

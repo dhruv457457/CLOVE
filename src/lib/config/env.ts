@@ -39,25 +39,7 @@ export function getSessionPrivateKey(): `0x${string}` {
   return key as `0x${string}`;
 }
 
-/**
- * x402 revenue address. NO Hardhat fallback — unset means we must NOT route real
- * USDC to a publicly-known test address. Prefers the explicit payout address, then
- * the session address; throws if neither is a valid 20-byte address.
- */
-export function getPayToAddress(): `0x${string}` {
-  const addr =
-    process.env.CLOVE_PAY_TO_ADDRESS?.trim() ||
-    process.env.NEXT_PUBLIC_CLOVE_SESSION_ADDRESS?.trim();
-  if (!addr || !/^0x[0-9a-fA-F]{40}$/.test(addr)) {
-    throw new Error(
-      "[config] No x402 pay-to address. Set CLOVE_PAY_TO_ADDRESS or " +
-        "NEXT_PUBLIC_CLOVE_SESSION_ADDRESS to a real 0x address.",
-    );
-  }
-  return addr as `0x${string}`;
-}
-
-/** Internal server-to-server secret used to authenticate internal x402 calls. */
+/** Internal server-to-server secret used to authenticate internal CLOVE calls. */
 export function getInternalSecret(): string {
   return requireEnv("CLOVE_INTERNAL_SECRET");
 }
@@ -67,14 +49,3 @@ export function getInternalSecretOptional(): string | undefined {
   const v = process.env.CLOVE_INTERNAL_SECRET;
   return v && v.trim() !== "" ? v.trim() : undefined;
 }
-
-/**
- * Canonical x402 service prices (USDC). Single source so routes and the run loop
- * never disagree about what a call costs. The run loop should still prefer the
- * X-Clove-Cost response header (actual charged amount) over these defaults.
- */
-export const X402_PRICES = {
-  intelligence: 0.01,
-  tts: 0.005,
-  image: 0.01,
-} as const;

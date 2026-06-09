@@ -4,6 +4,7 @@ import {
   connectWallet,
   getConnectedAccounts,
   requestUsdcPermission,
+  requestFundManagerPermission,
   revokePermissionOnChain,
   type GrantedPermission,
   type RevocationResult,
@@ -169,29 +170,52 @@ class MetaMaskStore {
       this.log("meta", `Context (${permission.permissionsContext.length} chars): ${permission.permissionsContext.slice(0, 18)}…${permission.permissionsContext.slice(-16)}`);
       this.log("meta", `DelegationManager: ${permission.delegationManager}`);
       this.log("meta", `Expires: ${new Date(permission.expiresAt * 1000).toLocaleDateString()}`);
+    } catch (e) {
+      this.log("error", `Permission request failed: ${e instanceof Error ? e.message : e}`);
+    }
+  }
 
-      // Store in 1Shot API (best-effort) — update DB if we get a delegationId back
-      fetch("/api/x402/store-delegation", {
+  /**
+   * Grant to the FUND MANAGER and allocate scoped, on-chain-capped budgets to
+   * each worker (true A2A). Used for multi-agent teams. The Fund Manager
+   * redelegates a real `buildRedeemableWorkerChain` to every spending worker, so
+   * each one's cap is enforced on-chain (overspend reverts).
+   *
+   * Returns the number of workers allocated, or null on failure.
+   */
+  async requestFundManagerGrant(budgetUsdc: string, periodDays: number): Promise<number | null> {
+    if (!this.state.userAddress) { this.log("error", "Connect MetaMask first."); return null; }
+    this.log("info", `Requesting Fund Manager grant: ${budgetUsdc} USDC / ${periodDays}-day period`);
+
+    try {
+      // Resolve the Fund Manager (session EOA) the grant must target.
+      const res = await fetch("/api/session/address?role=fund-manager");
+      if (!res.ok) throw new Error("Could not resolve Fund Manager address");
+      const { address } = await res.json() as { address: `0x${string}` };
+
+      const permission = await requestFundManagerPermission(address, budgetUsdc, periodDays);
+
+      await this.persistPermissionToDb(permission);
+      this.state = { ...this.state, permission };
+      this.notify();
+      this.log("success", "Fund Manager grant signed ✓ — allocating worker budgets…");
+
+      // Fund Manager divides the grant into scoped, capped slices per worker.
+      const alloc = await fetch("/api/agent/allocate-fund-manager", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          walletAddress:      this.state.userAddress,
           permissionsContext: permission.permissionsContext,
-          expiresAt:          permission.expiresAt,
+          delegationManager:  permission.delegationManager,
         }),
-      })
-        .then(r => r.json())
-        .then(async d => {
-          if (d.delegationId) {
-            this.log("meta", `Stored in 1Shot: ${d.delegationId}`);
-            const updated = { ...permission, delegationId: d.delegationId };
-            await this.persistPermissionToDb(updated);
-            this.state = { ...this.state, permission: updated };
-            this.notify();
-          }
-        })
-        .catch(() => {});
+      });
+      const data = await alloc.json() as { allocated?: number; total?: number };
+      this.log("success", `${data.allocated ?? 0}/${data.total ?? 0} workers funded with on-chain-capped budgets ✓`);
+      return data.allocated ?? 0;
     } catch (e) {
-      this.log("error", `Permission request failed: ${e instanceof Error ? e.message : e}`);
+      this.log("error", `Fund Manager grant failed: ${e instanceof Error ? e.message : e}`);
+      return null;
     }
   }
 

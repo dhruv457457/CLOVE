@@ -14,6 +14,7 @@ const LINE_MID = "rgba(244,241,234,0.11)";
 
 interface AgentStats {
   address:             string;
+  lastTxHash:          string | null;
   totalRuns:           number;
   totalExecuted:       number;
   totalX402SpentUsdc:  number;
@@ -92,9 +93,9 @@ export function AgentIdentityCard({
         </div>
       </div>
 
-      {/* On-chain address */}
+      {/* Agent delegate key — signs the scoped delegation; holds NO funds (non-custodial). */}
       <div style={{ display: "flex", flexDirection: "column", gap: 4, paddingBottom: 12, borderBottom: `1px solid ${LINE}` }}>
-        <div style={{ fontSize: 10.5, color: MID, letterSpacing: "0.06em" }}>On-chain address</div>
+        <div style={{ fontSize: 10.5, color: MID, letterSpacing: "0.06em" }}>Agent key · delegate signer</div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           <span style={{ fontSize: 12, color: TEXT, fontVariantNumeric: "tabular-nums", wordBreak: "break-all", flex: 1 }}>
             {stats?.address ?? "—"}
@@ -106,14 +107,23 @@ export function AgentIdentityCard({
             Copy
           </button>
         </div>
-        {stats?.address && (
+        <div style={{ fontSize: 9.5, color: MID, lineHeight: 1.45, marginTop: 1 }}>
+          Signs this agent&apos;s capped delegation. Holds no funds — USDC moves from your
+          wallet straight into the protocol via the relayer.
+        </div>
+
+        {/* The REAL on-chain activity: the latest execution tx. */}
+        <div style={{ fontSize: 10.5, color: MID, letterSpacing: "0.06em", marginTop: 8 }}>Latest on-chain execution</div>
+        {stats?.lastTxHash ? (
           <a
-            href={`https://basescan.org/address/${stats.address}`}
+            href={`https://basescan.org/tx/${stats.lastTxHash}`}
             target="_blank" rel="noopener noreferrer"
-            style={{ fontSize: 10.5, color: ACCENT, textDecoration: "underline", letterSpacing: "0.02em", marginTop: 2, alignSelf: "flex-start" }}
+            style={{ fontSize: 11.5, color: ACCENT, textDecoration: "underline", letterSpacing: "0.02em", fontVariantNumeric: "tabular-nums", alignSelf: "flex-start", wordBreak: "break-all" }}
           >
-            View on Basescan ↗
+            {stats.lastTxHash.slice(0, 14)}…{stats.lastTxHash.slice(-8)} ↗
           </a>
+        ) : (
+          <span style={{ fontSize: 11, color: MID }}>No execution yet — agent has only scanned/held.</span>
         )}
 
         {/* ERC-8004 identity (QuickNode) */}
@@ -143,7 +153,7 @@ export function AgentIdentityCard({
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 0 }}>
         <Stat label="Total runs"     value={stats?.totalRuns ?? 0} />
         <Stat label="Total executed" value={stats?.totalExecuted ?? 0} borderLeft />
-        <Stat label="x402 spent"     value={`${x402Total.toFixed(3)}`} unit="USDC" borderTop />
+        <Stat label="Intel spent"    value={`${x402Total.toFixed(3)}`} unit="USDC" borderTop />
         <Stat label="Budget used"    value={`${(stats?.budgetUtilization ?? 0).toFixed(0)}`} unit="%" borderTop borderLeft />
       </div>
 
@@ -163,7 +173,7 @@ export function AgentIdentityCard({
         <div style={{ fontSize: 10.5, color: MID, letterSpacing: "0.06em" }}>Spending breakdown</div>
         <SpendingBar budget={budgetN} x402={x402Total} defi={defiAmount} remaining={remaining} />
         <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: MID_2, fontVariantNumeric: "tabular-nums" }}>
-          <span>x402 {x402Total.toFixed(3)}</span>
+          <span>intel {x402Total.toFixed(3)}</span>
           <span>defi {defiAmount.toFixed(2)}</span>
           <span>remaining {remaining.toFixed(2)}</span>
         </div>

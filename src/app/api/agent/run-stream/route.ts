@@ -97,7 +97,16 @@ export async function POST(request: NextRequest) {
           agent.delegationContext.length > 20 &&
           !/^0x0*$/.test(agent.delegationContext);
 
-        if (!hasRealCtx) {
+        // READ-ONLY agents (scouts / analyzers) research + write to shared team
+        // memory but never transact — they have a "0xresearch-only" context and a
+        // 0 budget. They're allowed to run WITHOUT a spending permission; they
+        // simply can't call executeDefi (and the forced-deposit path is gated on
+        // a real context below). Only block a SPENDING agent that lacks a grant.
+        const isReadOnly =
+          agent.delegationContext === "0xresearch-only" ||
+          (Number(agent.budgetUsdc) || 0) === 0;
+
+        if (!hasRealCtx && !isReadOnly) {
           send("error", {
             message:
               "No real ERC-7715 permission found for this agent. " +
@@ -229,7 +238,10 @@ export async function POST(request: NextRequest) {
         const isYieldType   = !agent.agentType || agent.agentType === "yield" || agent.agentType === "rebalancer";
         const neverExecuted = (agent.totalExecuted ?? 0) === 0 && (agent.budgetUsedUsdc ?? 0) === 0;
         const sawHighRisk   = allToolResults.some(r => r.tool === "checkRisk" && /\bhigh\b/i.test(r.result));
-        const shouldFirstDeposit = isYieldType && neverExecuted && !sawHighRisk;
+        // Only a SPENDING agent (real context + budget) may force a first deposit —
+        // never a read-only scout/analyzer.
+        const canSpend      = !!hasRealCtx && (Number(agent.budgetUsdc) || 0) > 0;
+        const shouldFirstDeposit = canSpend && isYieldType && neverExecuted && !sawHighRisk;
 
         if (!executedOnce && (wantsImmediate || shouldFirstDeposit)) {
           // Protocol: first one named in the goal, else Morpho (a safe blue-chip default).

@@ -44,26 +44,58 @@ export async function getSessionAddress(): Promise<`0x${string}`> {
 }
 
 /**
- * Bug 3 fix — per-agent smart account address.
+ * Per-agent DERIVED key (option C).
  *
- * Each agent gets a deterministic counterfactual smart account address derived
- * from keccak256(signerAddress || agentId).  The account is NOT deployed until
- * the agent actually executes — it's purely address derivation (cheap).
+ * Each agent gets its OWN private key, derived deterministically from the single
+ * root session key: childKey = keccak256(rootKey ‖ agentId). This gives every
+ * agent a genuinely independent signer + smart account (truly separate on-chain
+ * identities), while only ONE secret (CLOVE_SESSION_KEY) is ever stored.
  *
- * This gives each agent an independent on-chain identity so sub-delegations
- * scope correctly (A → B → C, each with separate caps and revocations).
+ * This is what makes A2A real: the orchestrator redelegates a scoped budget to
+ * each worker's smart account, and the worker signs/redeems with its OWN key.
  */
-export async function getAgentSmartAccountAddress(agentId: string): Promise<`0x${string}`> {
-  const signer = privateKeyToAccount(getSessionPrivateKey());
-  const salt   = keccak256(encodePacked(["address", "string"], [signer.address, agentId]));
-  const account = await toMetaMaskSmartAccount({
+export function getAgentPrivateKey(agentId: string): `0x${string}` {
+  const root = getSessionPrivateKey() as `0x${string}`;
+  return keccak256(encodePacked(["bytes32", "string"], [root, agentId]));
+}
+
+/** The per-agent EOA signer derived from the root key. */
+export function getAgentSigner(agentId: string) {
+  return privateKeyToAccount(getAgentPrivateKey(agentId));
+}
+
+/**
+ * EOA addresses (NOT smart accounts) for delegation chains.
+ *
+ * When a delegation is signed with a raw private key, the DelegationManager
+ * recovers an ECDSA signature and compares it to the `delegator` address. So the
+ * delegator MUST be the EOA address of the signing key — using a counterfactual
+ * smart-account address there throws InvalidEOASignature(). These helpers return
+ * the EOA addresses used as delegators in buildRedeemableWorkerChain.
+ */
+export function getSessionEoaAddress(): `0x${string}` {
+  return privateKeyToAccount(getSessionPrivateKey()).address;
+}
+export function getAgentEoaAddress(agentId: string): `0x${string}` {
+  return getAgentSigner(agentId).address;
+}
+
+/** The per-agent MetaMask smart account, OWNED by the agent's derived key. */
+export async function getAgentSmartAccount(agentId: string) {
+  const signer = getAgentSigner(agentId);
+  return toMetaMaskSmartAccount({
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     client: publicClient as any,
     implementation: Implementation.Hybrid,
     deployParams: [signer.address, [], [], []],
-    deploySalt:    salt,
-    signer:        { account: signer },
+    deploySalt:   "0x", // the derived key already makes the address unique
+    signer:       { account: signer },
   });
+}
+
+/** Deterministic counterfactual address for an agent (owned by its derived key). */
+export async function getAgentSmartAccountAddress(agentId: string): Promise<`0x${string}`> {
+  const account = await getAgentSmartAccount(agentId);
   return account.address;
 }
 

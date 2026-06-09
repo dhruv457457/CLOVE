@@ -2,7 +2,6 @@ import "server-only";
 
 import { getVeniceClient, VENICE_MODELS } from "./client";
 import { fetchLiveYields, type LiveYield } from "@/lib/defi/llamaYields";
-import { X402_PRICES } from "@/lib/config/env";
 
 export interface YieldReport {
   /** Per-protocol APY map (real DeFiLlama numbers), keyed by protocol name. */
@@ -64,7 +63,7 @@ export async function analyzeYieldsWithVenice(): Promise<YieldReport> {
       reason: "",
       analysis: "No live yield data available from DeFiLlama right now.",
       timestamp: Date.now(),
-      pricePaid: X402_PRICES.intelligence,
+      pricePaid: 0,
       poweredBy: "defillama",
       live: [],
       source: "defillama",
@@ -119,7 +118,7 @@ export async function analyzeYieldsWithVenice(): Promise<YieldReport> {
     reason,
     analysis,
     timestamp: Date.now(),
-    pricePaid: X402_PRICES.intelligence,
+    pricePaid: 0,
     poweredBy,
     live: rows,
     source: "defillama",

@@ -1,5 +1,6 @@
 import "server-only";
 import OpenAI from "openai";
+import { internalHeaders } from "@/lib/auth/internal";
 
 /**
  * The tool catalog for the new goalâ†’planâ†’execute agent loop.
@@ -18,7 +19,7 @@ export const TOOL_DEFINITIONS: OpenAI.Chat.ChatCompletionTool[] = [
     function: {
       name: "checkYields",
       description:
-        "Fetch live DeFi yields (APY) + market news from Morpho, Aave, Aerodrome, Lido, Uniswap on Base. Paid via x402 (0.01 USDC). ALWAYS call first when scouting.",
+        "Fetch live DeFi yields (APY) + market news from Morpho, Aave, Aerodrome, Lido, Uniswap on Base. ALWAYS call first when scouting.",
       parameters: {
         type: "object",
         properties: {
@@ -89,67 +90,6 @@ export const TOOL_DEFINITIONS: OpenAI.Chat.ChatCompletionTool[] = [
         required: ["message"],
         properties: {
           message: { type: "string" },
-        },
-      },
-    },
-  },
-
-  // â”€â”€ Polymarket tools (prediction-market agent, Polygon) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-  // Commit-before-reveal flow to stop the agent anchoring to the market price:
-  //   1. checkPolymarketMarkets returns QUESTIONS ONLY â€” prices are hidden.
-  //   2. assessProbability forces the agent to commit its OWN estimate as an
-  //      argument, THEN reveals the live price and computes the edge.
-  //   3. placePolymarketBet re-checks the edge server-side and rejects no-edge bets.
-  {
-    type: "function",
-    function: {
-      name: "checkPolymarketMarkets",
-      description:
-        "Fetch live open Polymarket markets (real Gamma API). IMPORTANT: market prices are HIDDEN on purpose â€” you must form your own probability estimate from the QUESTION before seeing the odds. Returns question, outcome labels, clobTokenIds, and volume/liquidity only.",
-      parameters: {
-        type: "object",
-        properties: {
-          topic: { type: "string", description: "Keyword to filter markets, e.g. 'crypto', 'election', 'bitcoin'" },
-          limit: { type: "number", description: "Max markets to return (default 12)" },
-        },
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "assessProbability",
-      description:
-        "Commit YOUR OWN probability estimate for an outcome, THEN reveal the live market price and the edge. You MUST call this (and reason about the question first) before placing any bet â€” it is how you avoid anchoring to the crowd. Returns marketPrice, edge, and whether the edge clears the threshold.",
-      parameters: {
-        type: "object",
-        required: ["clobTokenId", "outcome", "myProbability", "reasoning"],
-        properties: {
-          clobTokenId:   { type: "string", description: "CLOB token id of the outcome you're assessing" },
-          outcome:       { type: "string", description: "The outcome label, e.g. 'Yes'" },
-          myProbability: { type: "number", description: "YOUR independent estimate of this outcome's true probability (0â€“1), formed from the question BEFORE seeing the price" },
-          reasoning:     { type: "string", description: "Why you estimate this probability â€” the basis for your number" },
-        },
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "placePolymarketBet",
-      description:
-        "Place a bet on a Polymarket outcome. Requires the probability you committed in assessProbability â€” the server recomputes the edge from the live price and REJECTS the bet if the edge is too small. Size proportionally to your confidence and budget.",
-      parameters: {
-        type: "object",
-        required: ["marketId", "outcome", "clobTokenId", "myProbability", "sizeUsdc", "reasoning"],
-        properties: {
-          marketId:      { type: "string" },
-          conditionId:   { type: "string" },
-          clobTokenId:   { type: "string", description: "CLOB token id for the chosen outcome" },
-          outcome:       { type: "string", description: "The outcome label you're betting on, e.g. 'Yes'" },
-          myProbability: { type: "number", description: "The independent estimate you committed in assessProbability (0â€“1)" },
-          sizeUsdc:      { type: "number", description: "Bet size in USDC" },
-          reasoning:     { type: "string", description: "Your thesis + the edge you found" },
         },
       },
     },
@@ -317,32 +257,10 @@ export interface ExecutorContext {
   /** Set when run-stream wants the budget guard active. */
   agentId?:            string;
   budgetUsedUsdc?:     number;
-  /** Chain the agent runs on (8453 Base, 137 Polygon). Used by Polymarket tools. */
+  /** Chain the agent runs on (8453 Base). */
   chainId?:            number;
   /** Agent-type-specific config (tracked wallets, edge threshold, topic, etc.). */
   typeConfig?:         Record<string, unknown>;
-}
-
-/** Minimum |edge| (estimate vs market price) required before a Polymarket bet is allowed. */
-const POLYMARKET_MIN_EDGE = 0.05;
-
-/**
- * Fetch the live buy-side price (0â€“1) for a single Polymarket CLOB token.
- * Public endpoint, no auth. Returns null on any failure so callers can degrade.
- */
-async function fetchClobPrice(clobTokenId: string): Promise<number | null> {
-  try {
-    const res = await fetch(
-      `https://clob.polymarket.com/price?token_id=${encodeURIComponent(clobTokenId)}&side=buy`,
-      { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(8000) },
-    );
-    if (!res.ok) return null;
-    const data = await res.json() as { price?: string | number };
-    const price = typeof data.price === "string" ? Number.parseFloat(data.price) : data.price;
-    return typeof price === "number" && price > 0 && price < 1 ? price : null;
-  } catch {
-    return null;
-  }
 }
 
 /**
@@ -386,54 +304,20 @@ export async function executeTool(
         marketIntel?: { tavilyAnswer?: string; newsHeadline?: string };
         _clove?: { paid?: boolean; costUsdc?: number; via?: string };
       };
-      // SEC-2: Build a valid internal signature for demo/fallback calls.
-      // "demo-fallback" and "demo-no-permission" are rejected by verifyPayment()
-      // since Bug 6 fix â€” we now use CLOVE_INTERNAL_SECRET for server-side calls.
-      const makeInternalSig = () => Buffer.from(JSON.stringify({
-        internalSecret: process.env.CLOVE_INTERNAL_SECRET ?? "",
-        payload: { permissionContext: ctx.permissionsContext ?? "0x" + "0".repeat(42) },
-      })).toString("base64");
-
-      if (ctx.permissionsContext && ctx.permissionsContext !== "demo" && ctx.permissionsContext !== "0xdemo") {
-        const payRes = await fetch(`${ctx.baseUrl}/api/x402/pay`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            endpoint:           "/api/intelligence",
-            permissionsContext: ctx.permissionsContext,
-            delegationManager:  ctx.delegationManager ?? "0x",
-            ...(ctx.delegationId ? { delegationId: ctx.delegationId } : {}),
-          }),
-        });
-        if (!payRes.ok) {
-          // x402/pay failed â€” fall back to internal signature
-          const fb = await fetch(`${ctx.baseUrl}/api/intelligence`, {
-            headers: { "PAYMENT-SIGNATURE": makeInternalSig() },
-          });
-          data = await fb.json();
-        } else {
-          data = await payRes.json();
-        }
-      } else {
-        // Demo mode â€” use internal secret so verifyPayment() accepts it
-        const res = await fetch(`${ctx.baseUrl}/api/intelligence`, {
-          headers: { "PAYMENT-SIGNATURE": makeInternalSig() },
-        });
-        data = await res.json();
-      }
-      const cost = data._clove?.costUsdc ?? 0.01;
+      // Call the internal intelligence endpoint directly (x402 removed).
+      const res = await fetch(`${ctx.baseUrl}/api/intelligence`, {
+        headers: internalHeaders(),
+      });
+      data = await res.json();
       return {
         tool: name,
         args,
-        cost,
         result: JSON.stringify({
           bestApy:      data.bestApy,
           recommended:  data.recommended,
           reason:       data.reason,
           yields:       data.yields,
           marketNews:   data.marketIntel?.tavilyAnswer?.slice(0, 200),
-          paidVia:      data._clove?.via ?? "demo",
-          costPaid:     cost,
         }),
       };
     } catch (e) {
@@ -551,6 +435,8 @@ Return ONLY JSON: { "riskLevel": "LOW"|"MEDIUM"|"HIGH", "safeToExecute": true|fa
       const data = await res.json() as {
         submitted?: boolean; prepared?: boolean; txHash?: string;
         contractAddress?: string; via?: string;
+        receiptToken?: { symbol: string; address: string; name: string };
+        receivedAmount?: string;
       };
       return {
         tool: name,
@@ -559,11 +445,14 @@ Return ONLY JSON: { "riskLevel": "LOW"|"MEDIUM"|"HIGH", "safeToExecute": true|fa
         cost: 0, // CODE-1: DeFi execution cost tracked via on-chain gas (sponsored by 1Shot)
         result: JSON.stringify({
           reasoning:       args.reasoning,
+          protocol,
           submitted:       data.submitted,
           prepared:        data.prepared,
           txHash:          data.txHash,
           via:             data.via,
           contractAddress: data.contractAddress,
+          receiptToken:    data.receiptToken,
+          receivedAmount:  data.receivedAmount,
         }),
       };
     } catch (e) {
@@ -669,151 +558,6 @@ Return ONLY JSON: { "riskLevel": "LOW"|"MEDIUM"|"HIGH", "safeToExecute": true|fa
     }
   }
 
-  // â”€â”€ checkPolymarketMarkets â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-  if (name === "checkPolymarketMarkets") {
-    try {
-      const topic = String(args.topic ?? (ctx.typeConfig?.topic ?? "")).trim();
-      const limit = Number(args.limit ?? 12);
-      const qs = new URLSearchParams();
-      if (topic) qs.set("topic", topic);
-      qs.set("limit", String(limit));
-      const res = await fetch(`${ctx.baseUrl}/api/polymarket/markets?${qs}`, {
-        signal: AbortSignal.timeout(12000),
-      });
-      const data = await res.json() as {
-        markets?: Array<{ id: string; question: string; conditionId?: string; volumeUsd: number; liquidityUsd: number; outcomes: Array<{ label: string; price: number; clobTokenId?: string }> }>;
-        error?: string;
-      };
-      // Anti-anchoring: hide prices. The agent must estimate from the question,
-      // then reveal the price via assessProbability.
-      const markets = (data.markets ?? []).map(m => ({
-        marketId:    m.id,
-        conditionId: m.conditionId,
-        question:    m.question,
-        volumeUsd:   Math.round(m.volumeUsd),
-        liquidityUsd: Math.round(m.liquidityUsd),
-        outcomes:    m.outcomes.map(o => ({ label: o.label, clobTokenId: o.clobTokenId })),  // NO price
-      }));
-      return { tool: name, args, result: JSON.stringify({
-        count: markets.length,
-        markets,
-        note: "Prices are hidden on purpose. Form your own probability estimate from each question, then call assessProbability to reveal the price and compute your edge.",
-        source: "polymarket-gamma",
-        error: data.error,
-      })};
-    } catch (e) {
-      return { tool: name, args, result: JSON.stringify({ error: String(e), markets: [] }) };
-    }
-  }
-
-  // â”€â”€ assessProbability (commit-before-reveal â€” the anti-anchoring step) â”€â”€â”€â”€â”€â”€â”€â”€â”€
-  if (name === "assessProbability") {
-    const myProbability = Number(args.myProbability);
-    const clobTokenId   = String(args.clobTokenId ?? "");
-    if (!clobTokenId || !(myProbability >= 0 && myProbability <= 1)) {
-      return { tool: name, args, result: JSON.stringify({ error: "clobTokenId and myProbability (0â€“1) are required" }) };
-    }
-    const marketPrice = await fetchClobPrice(clobTokenId);
-    if (marketPrice === null) {
-      return { tool: name, args, result: JSON.stringify({
-        error: "Could not fetch live market price for that token",
-        myProbability, clobTokenId, outcome: args.outcome,
-      })};
-    }
-    const edge      = myProbability - marketPrice;      // +ve = you think it's underpriced
-    const absEdge   = Math.abs(edge);
-    const threshold = Number(ctx.typeConfig?.minEdge ?? POLYMARKET_MIN_EDGE);
-    const shouldBet = absEdge >= threshold;
-    return { tool: name, args, result: JSON.stringify({
-      outcome:       args.outcome,
-      myProbability,
-      marketPrice:   Number(marketPrice.toFixed(4)),
-      edge:          Number(edge.toFixed(4)),
-      edgeDirection: edge > 0 ? "market UNDERprices this outcome (buy candidate)" : "market OVERprices this outcome (pass or bet the other side)",
-      minEdge:       threshold,
-      shouldBet,
-      reasoning:     args.reasoning,
-      note: shouldBet
-        ? "Edge clears the threshold. If betting, size proportionally to your confidence."
-        : "Edge below threshold â€” this market is efficiently priced. Pass unless you have strong conviction.",
-    })};
-  }
-
-  // â”€â”€ placePolymarketBet â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-  if (name === "placePolymarketBet") {
-    const sizeUsdc  = Number(args.sizeUsdc ?? 0);
-    const budgetNum = Number.parseFloat(ctx.budgetUsdc) || 0;
-    const used      = ctx.budgetUsedUsdc ?? 0;
-    if (budgetNum > 0 && (used + sizeUsdc) > budgetNum * 0.95) {
-      return {
-        tool: name, args, cost: 0,
-        result: JSON.stringify({ blocked: true, reason: "Budget guard â€” bet would exceed 95% of cap", budgetUsdc: budgetNum, usedUsdc: used, requested: sizeUsdc }),
-      };
-    }
-
-    // Edge gate: recompute the edge from the LIVE price using the probability
-    // the agent committed. Reject no-edge bets so the agent can't just bet the
-    // crowd's number back at it.
-    const myProbability = Number(args.myProbability);
-    const clobTokenId   = String(args.clobTokenId ?? "");
-    const livePrice     = clobTokenId ? await fetchClobPrice(clobTokenId) : null;
-    const threshold     = Number(ctx.typeConfig?.minEdge ?? POLYMARKET_MIN_EDGE);
-    if (livePrice !== null && myProbability >= 0 && myProbability <= 1) {
-      const absEdge = Math.abs(myProbability - livePrice);
-      if (absEdge < threshold) {
-        return {
-          tool: name, args, cost: 0,
-          result: JSON.stringify({
-            blocked: true,
-            reason:  `Edge gate â€” |${myProbability} âˆ’ ${livePrice.toFixed(4)}| = ${absEdge.toFixed(4)} is below the ${threshold} minimum edge. No bet placed.`,
-            myProbability, marketPrice: Number(livePrice.toFixed(4)), edge: Number((myProbability - livePrice).toFixed(4)), minEdge: threshold,
-          }),
-        };
-      }
-    }
-
-    try {
-      const res = await fetch(`${ctx.baseUrl}/api/polymarket/bet`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          agentId:            ctx.agentId,
-          walletAddress:      ctx.walletAddress,
-          marketId:           args.marketId,
-          conditionId:        args.conditionId,
-          clobTokenId:        args.clobTokenId,
-          outcome:            args.outcome,
-          price:              livePrice ?? args.price,   // record the real fill-time price
-          sizeUsdc,
-          reasoning:          args.reasoning,
-          permissionsContext: ctx.permissionsContext,
-          delegationManager:  ctx.delegationManager,
-        }),
-        signal: AbortSignal.timeout(25000),
-      });
-      const data = await res.json() as { bet?: { id: string; status: string }; submitted?: boolean; prepared?: boolean; txHash?: string; via?: string };
-      return {
-        // cost:0 â€” the bet principal is NOT an x402 micropayment (matches
-        // executeDefi/executeCopyTrade). Counting the stake here mislabeled it as
-        // x402 spend and did so even for prepared-only bets that never executed.
-        // The stake is tracked separately in the polymarket_bets collection.
-        tool: name, args, txHash: data.txHash, cost: 0,
-        result: JSON.stringify({
-          reasoning: args.reasoning,
-          betId:     data.bet?.id,
-          status:    data.bet?.status,
-          submitted: data.submitted,
-          prepared:  data.prepared,
-          txHash:    data.txHash,
-          via:       data.via,
-        }),
-      };
-    } catch (e) {
-      return { tool: name, args, result: JSON.stringify({ error: String(e) }) };
-    }
-  }
-
-  // â”€â”€ checkWhaleTrades â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // ── discoverWhales ──────────────────────────────────────────────────────────
   if (name === "discoverWhales") {
     try {

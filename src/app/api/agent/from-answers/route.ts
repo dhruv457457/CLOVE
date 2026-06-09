@@ -31,8 +31,6 @@ interface Answers {
 /** Pull type-specific config out of the questionnaire answers. */
 function buildTypeConfig(agentType: AgentType, answers: Answers, prompt: string): Record<string, unknown> {
   switch (agentType) {
-    case "polymarket":
-      return { topic: answers.topic ?? extractTopic(prompt) };
     case "copy-trader": {
       // 1st: explicit wallet list from questionnaire
       // 2nd: any 0x addresses the user typed directly in the prompt
@@ -56,15 +54,6 @@ function buildTypeConfig(agentType: AgentType, answers: Answers, prompt: string)
 function extractWallets(prompt: string): string[] {
   const matches = prompt.match(/0x[a-fA-F0-9]{40}/g) ?? [];
   return [...new Set(matches.map(a => a.toLowerCase()))];
-}
-
-/** Cheap topic extractor for Polymarket agents created from free text. */
-function extractTopic(prompt: string): string {
-  const p = prompt.toLowerCase();
-  if (/(crypto|bitcoin|btc|eth|ethereum|token)/.test(p)) return "crypto";
-  if (/(election|president|vote|politic)/.test(p))       return "election";
-  if (/(sport|game|match|nba|nfl|soccer)/.test(p))       return "sports";
-  return "";
 }
 
 export async function POST(request: NextRequest) {
@@ -94,7 +83,7 @@ export async function POST(request: NextRequest) {
   // Explicit selection from the questionnaire wins; otherwise infer from prompt.
   // The questionnaire answer may be a slug ("polymarket") or a human label
   // ("🎲 Polymarket Agent") — normalise both through inferAgentType.
-  const VALID_TYPES: AgentType[] = ["yield", "polymarket", "copy-trader", "narrative", "rebalancer"];
+  const VALID_TYPES: AgentType[] = ["yield", "copy-trader", "narrative", "rebalancer"];
   const rawType = String(answers.agentType ?? "").toLowerCase().trim();
   const agentType: AgentType =
       (VALID_TYPES.includes(rawType as AgentType) ? (rawType as AgentType) : undefined)
@@ -276,7 +265,6 @@ export async function POST(request: NextRequest) {
       agentType,
       chainId:  typeDef.chainId,
       chainName: typeDef.chainName,
-      // Polymarket needs a Polygon permission; signal the UI to prompt a chain switch.
       needsChainSwitch: typeDef.chainId !== 8453,
     });
   }

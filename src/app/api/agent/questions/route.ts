@@ -50,7 +50,6 @@ agentType, protocols, risk, budget, schedule, notify, orchestration.
 
 CLOVE supports these agent archetypes (the "agentType" question MUST use exactly these option strings):
 - "yield" — Finds and farms the best DeFi yields on Base
-- "polymarket" — Bets on Polymarket prediction markets (runs on Polygon)
 - "copy-trader" — Mirrors smart-money wallets when they converge (Base)
 - "narrative" — Catches social/narrative momentum early (Base)
 - "rebalancer" — Monitors real on-chain positions & rebalances to better yields (Base)
@@ -69,7 +68,7 @@ Return ONLY valid JSON — no prose:
       "label": "What kind of agent is this?",
       "hint": "Each archetype perceives a different real data source and acts on its own",
       "type": "single",
-      "options": ["yield", "polymarket", "copy-trader", "narrative", "rebalancer"]
+      "options": ["yield", "copy-trader", "narrative", "rebalancer"]
     },
     {
       "id": "protocols",
@@ -158,7 +157,7 @@ function defaultQuestions(): Question[] {
       id: "agentType", label: "What kind of agent is this?",
       hint: "Each archetype perceives a different real data source and acts on its own",
       type: "single",
-      options: ["yield", "polymarket", "copy-trader", "narrative", "rebalancer"],
+      options: ["yield", "copy-trader", "narrative", "rebalancer"],
     },
     {
       id: "protocols", label: "Which protocols should the agent use?",

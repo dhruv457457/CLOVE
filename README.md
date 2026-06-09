@@ -4,9 +4,9 @@
 
 ### Autonomous capital, with budgets it *physically* can't break.
 
-**Grant one capped USDC budget. A Fund Manager AI splits it across specialized agents — each with its own key, its own smart account, and an on-chain budget it cannot exceed. They research, decide, and execute on Base + Polygon while you sleep. Fully non-custodial. Revocable in one click.**
+**Grant one capped USDC budget. A Fund Manager AI splits it across specialized agents — each with its own key, its own smart account, and an on-chain budget it cannot exceed. They research, decide, and execute on Base while you sleep. Fully non-custodial. Revocable in one click.**
 
-[![Built on Base + Polygon](https://img.shields.io/badge/Built%20on-Base%20%2B%20Polygon-0052FF?style=flat-square)](https://base.org)
+[![Built on Base](https://img.shields.io/badge/Built%20on-Base%20mainnet-0052FF?style=flat-square)](https://base.org)
 [![ERC-7715](https://img.shields.io/badge/Permissions-ERC--7715-C8FF3D?style=flat-square)](https://eips.ethereum.org/EIPS/eip-7715)
 [![ERC-7710](https://img.shields.io/badge/Delegation-ERC--7710-C8FF3D?style=flat-square)](https://eips.ethereum.org/EIPS/eip-7710)
 [![1Shot Relayer](https://img.shields.io/badge/Gas-1Shot%20Relayer%20(USDC)-9b87f5?style=flat-square)](https://1shotapi.com)
@@ -76,11 +76,9 @@ Autonomous DeFi agents force a brutal trade-off:
                                                        ▼
                               1Shot Public Relayer  (gas in USDC, no ETH)
                                                        │
-                                          ┌────────────┴────────────┐
-                                          ▼                         ▼
-                                    Base mainnet              Polygon (Polymarket)
-                            Morpho · Aave · Uniswap         prediction-market bets
-                            · Aerodrome · Lido
+                                                       ▼
+                                                 Base mainnet
+                                  Morpho · Aave · Uniswap · Aerodrome · Lido
 ```
 
 - **Derived keys (option C):** every agent gets its own key — `keccak256(rootKey ‖ agentId)` — so it's a genuinely separate signer + smart account. One secret is ever stored.
@@ -96,7 +94,7 @@ Autonomous DeFi agents force a brutal trade-off:
 | **Best A2A coordination** | A Fund Manager redelegates **real ERC-7710 scoped chains** to worker agents — each with its own key + on-chain-enforced cap. **Overspend reverts on-chain (provable).** Agents coordinate via shared team memory (scout findings feed the analyzer feeds the executor). |
 | **Best Agent** | A from-scratch Venice **ReAct loop** (no LangChain) that plans, scouts live yields, reasons against persistent memory **+ the user's uploaded playbook (RAG)**, executes real deposits, and reflects. |
 | **Best Venice AI** | **Four** Venice surfaces: reasoning (`llama-3.3-70b`), embeddings (RAG knowledge base), TTS voice reports, and image strategy cards. |
-| **Best 1Shot Relayer** | **All** execution flows through the **permissionless Public Relayer** — gas paid in USDC, zero ETH, **multi-chain** (Base + Polygon). |
+| **Best 1Shot Relayer** | **All** execution flows through the **permissionless Public Relayer** — gas paid in USDC, zero ETH. |
 | **Best Social Media** | [@clove_fi_ai](https://x.com/clove_fi_ai) |
 
 ---
@@ -121,9 +119,6 @@ Genuine Morpho (Moonwell) / Aave v3 deposits via the `CloveAutoDeposit` contract
 ### 🐋 Dune-powered copy-trade
 Discover the smartest money on Base via Dune Analytics (whale ranking + convergence), then mirror trades when multiple whales agree.
 
-### 🎲 Polymarket prediction bets (multi-chain)
-The Polymarket agent runs on **Polygon** — a Polygon ERC-7715 grant + the Polygon 1Shot relayer + real CLOB orders via `@polymarket/clob-client`.
-
 ### 🧠 Persistent memory · 📅 scheduling · 💬 Telegram reports
 
 ---
@@ -132,11 +127,10 @@ The Polymarket agent runs on **Polygon** — a Polygon ERC-7715 grant + the Poly
 
 We'd rather ship less and have it be true.
 
-**Real, on-chain (Base mainnet / Polygon):**
+**Real, on-chain (Base mainnet):**
 - ERC-7715 grant → ERC-7710 redemption via the 1Shot Public Relayer
 - Per-agent on-chain-enforced caps (overspend reverts — verifiable above)
 - Morpho (Moonwell) + Aave v3 deposits; on-chain revocation
-- Polymarket CLOB orders on Polygon
 - Venice reasoning, embeddings/RAG, TTS, image
 
 **Cut:**
@@ -150,10 +144,9 @@ We'd rather ship less and have it be true.
 |---|---|
 | Framework | Next.js 16 (App Router), TypeScript, Tailwind |
 | Smart accounts | `@metamask/smart-accounts-kit` (ERC-7715/7710, caveat enforcers, `Implementation.Hybrid`) |
-| Execution | 1Shot **Public Relayer** (permissionless, gas-in-USDC) — Base + Polygon |
+| Execution | 1Shot **Public Relayer** (permissionless, gas-in-USDC) on Base |
 | AI | Venice AI (OpenAI-compatible): `llama-3.3-70b` + embeddings + `tts-kokoro` + image |
-| Onchain | `viem` 2.x · Base mainnet (8453) + Polygon (137) |
-| Prediction markets | `@polymarket/clob-client` |
+| Onchain | `viem` 2.x · Base mainnet (8453) |
 | Analytics | Dune Analytics (whale discovery) |
 | Canvas | `@xyflow/react` (compact-by-default nodes, click to expand) |
 | Store | MongoDB Atlas |
@@ -163,7 +156,6 @@ We'd rather ship less and have it be true.
 ## Supported protocols
 
 **Base (8453):** Morpho (Moonwell USDC) · Aave v3 · Uniswap v3 · Aerodrome · Lido (wstETH)
-**Polygon (137):** Polymarket (CLOB prediction markets)
 
 ---
 
@@ -199,9 +191,8 @@ NEXT_PUBLIC_CLOVE_SESSION_ADDRESS=0x26a5...   # 1Shot relayer target (Base)
 CLOVE_INTERNAL_SECRET=...                     # server-to-server auth (replaced x402)
 CLOVE_AUTO_DEPOSIT=0xb7aD6bcCD73db1a21A6144Ecbc9Cc225Dd6AF1dC
 
-# ── Chains ────────────────────────────────────────────
+# ── Chain ─────────────────────────────────────────────
 BASE_RPC=https://mainnet.base.org
-POLYGON_RPC=https://polygon-rpc.com
 
 # ── Store / notify ────────────────────────────────────
 MONGODB_URI=mongodb+srv://...
@@ -210,8 +201,6 @@ TELEGRAM_CHAT_ID=...
 
 # ── Optional ──────────────────────────────────────────
 DUNE_API_KEY=...                              # copy-trade whale discovery
-POLYMARKET_PK=0x...                           # Polymarket CLOB trader key (defaults to CLOVE_SESSION_KEY)
-POLYMARKET_API_KEY=...  POLYMARKET_API_SECRET=...  POLYMARKET_PASSPHRASE=...
 QUICKNODE_ENDPOINT=...                         # ERC-8004 agent registration
 CRON_SECRET=...                                # Vercel cron auth
 ```
@@ -245,4 +234,4 @@ MIT
 
 ## Acknowledgments
 
-MetaMask Smart Accounts Kit · 1Shot API (Public Relayer) · Venice AI · Dune Analytics · Polymarket · Base · Polygon.
+MetaMask Smart Accounts Kit · 1Shot API (Public Relayer) · Venice AI · Dune Analytics · Base.
