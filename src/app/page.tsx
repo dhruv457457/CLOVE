@@ -9,16 +9,17 @@ const PAPER  = "#F4F1EA";
 const INK    = "#0B0C09";
 
 const PROTOCOLS: { name: string; color: string; logo: React.ReactNode }[] = [
-  { name: "Morpho",    color: "#3B5BFF", logo: <MorphoLogo /> },
-  { name: "Uniswap",   color: "#FF007A", logo: <UniswapLogo /> },
-  { name: "Aerodrome", color: "#0F62FE", logo: <AerodromeLogo /> },
-  { name: "Lido",      color: "#00A3FF", logo: <LidoLogo /> },
-  { name: "Sky",       color: "#4A90D9", logo: <SkyLogo /> },
-  { name: "Venice AI", color: "#8B6BFF", logo: <VeniceLogo /> },
-  { name: "Tavily",    color: "#22C55E", logo: <TavilyLogo /> },
-  { name: "Base",      color: "#0052FF", logo: <BaseLogo /> },
-  { name: "MetaMask",  color: "#F6851B", logo: <MetaMaskLogo /> },
-  { name: "1Shot",     color: "#C8FF3D", logo: <OneShotLogo /> },
+  { name: "Morpho",     color: "#3B5BFF", logo: <MorphoLogo /> },
+  { name: "Aave",       color: "#B6509E", logo: <AaveLogo /> },
+  { name: "Uniswap",    color: "#FF007A", logo: <UniswapLogo /> },
+  { name: "Aerodrome",  color: "#0F62FE", logo: <AerodromeLogo /> },
+  { name: "Lido",       color: "#00A3FF", logo: <LidoLogo /> },
+  { name: "Polymarket", color: "#1652F0", logo: <PolymarketLogo /> },
+  { name: "Venice AI",  color: "#8B6BFF", logo: <VeniceLogo /> },
+  { name: "Base",       color: "#0052FF", logo: <BaseLogo /> },
+  { name: "Polygon",    color: "#7B3FE4", logo: <PolygonLogo /> },
+  { name: "MetaMask",   color: "#F6851B", logo: <MetaMaskLogo /> },
+  { name: "1Shot",      color: "#C8FF3D", logo: <OneShotLogo /> },
 ];
 
 const TYPED_PHRASES = [
@@ -171,7 +172,7 @@ export default function LandingPage() {
             >
               Live
             </span>
-            <span>x402 · ERC-7715 · 1Shot · Base mainnet</span>
+            <span>ERC-7715 · ERC-7710 · 1Shot Relayer · Base + Polygon</span>
             <span className="h-2.5 w-px" style={{ background: "rgba(14,15,12,0.12)" }} />
             <span>Network active · 24/7</span>
           </div>
@@ -184,12 +185,12 @@ export default function LandingPage() {
           </h1>
 
           <p className="max-w-[54ch] text-[20px] leading-[1.45] mb-11" style={{ color: "#2B2D27" }}>
-            CLOVE is the autonomous DeFi agent OS. Describe a strategy in plain English, grant one ERC-7715 budget,
-            and an AI agent{" "}
+            CLOVE is the autonomous DeFi agent OS. Describe a strategy in plain English, grant one capped
+            ERC-7715 budget, and a Fund Manager splits it across specialized agents that{" "}
             <strong style={{ background: `linear-gradient(transparent 62%, ${ACCENT} 62%)`, padding: "0 3px", fontWeight: 500 }}>
-              researches, decides, and executes
+              research, decide, and execute on-chain
             </strong>
-            {" "}— pays for market intel via x402, deposits via 1Shot, reports back. Fully non-custodial.
+            {" "}— gas paid in USDC via the 1Shot relayer. Fully non-custodial. Revocable in one click.
           </p>
 
           <div className="flex flex-wrap items-center gap-3.5">
@@ -238,10 +239,10 @@ export default function LandingPage() {
                   &ldquo;<TypedPrompt phrases={TYPED_PHRASES} />&rdquo;
                 </div>
                 <div className="mt-6 flex flex-wrap gap-4 text-[12px] uppercase tracking-[0.06em]" style={{ color: "#6B6A60" }}>
-                  <Meta num="6" label="nodes" />
-                  <Meta num="2" label="protocols" />
+                  <Meta num="5" label="agent types" />
+                  <Meta num="6" label="protocols" />
                   <Meta num="9.3%" label="best apy" />
-                  <Meta num="0.01" label="x402 cost" />
+                  <Meta num="USDC" label="gas paid in" />
                 </div>
               </div>
               <div className="relative overflow-hidden">
@@ -288,12 +289,11 @@ export default function LandingPage() {
           </div>
           <div className="flex flex-wrap justify-center gap-6">
             {[
-              { name: "Venice AI",  desc: "Private LLM inference",  color: "#8B6BFF", logo: <VeniceLogo /> },
-              { name: "1Shot API",  desc: "ERC-7715 redemption",     color: "#C8FF3D", logo: <OneShotLogo />, dark: true },
-              { name: "Tavily",     desc: "Real-time web search",    color: "#22C55E", logo: <TavilyLogo /> },
-              { name: "Base",       desc: "L2 execution layer",      color: "#0052FF", logo: <BaseLogo /> },
-              { name: "MetaMask",   desc: "ERC-7715 permissions",    color: "#F6851B", logo: <MetaMaskLogo /> },
-              { name: "x402",       desc: "HTTP payment protocol",   color: "#C8FF3D", logo: <X402Logo />,   dark: true },
+              { name: "MetaMask",   desc: "Advanced Permissions (ERC-7715)", color: "#F6851B", logo: <MetaMaskLogo /> },
+              { name: "1Shot API",  desc: "Permissionless relayer (ERC-7710)", color: "#C8FF3D", logo: <OneShotLogo />, dark: true },
+              { name: "Venice AI",  desc: "Private LLM + embeddings",  color: "#8B6BFF", logo: <VeniceLogo /> },
+              { name: "Base",       desc: "L2 execution layer",        color: "#0052FF", logo: <BaseLogo /> },
+              { name: "Polygon",    desc: "Polymarket execution",      color: "#7B3FE4", logo: <PolygonLogo /> },
             ].map((api) => (
               <div
                 key={api.name}
@@ -349,9 +349,9 @@ export default function LandingPage() {
             style={{ background: "rgba(14,15,12,0.12)", borderColor: "rgba(14,15,12,0.12)" }}
           >
             {[
-              { num: "01", title: "Scout",   body: "Pays Venice AI 0.01 USDC via x402 to fetch live yields, market news, and risk signals across Base." },
-              { num: "02", title: "Reason",  body: "Compares against memory: current position, last-5 runs, 7-day APY trends. Decides to deposit, hold, or rebalance." },
-              { num: "03", title: "Execute", body: "1Shot redeems your ERC-7715 delegation, signs a UserOp, broadcasts on Base mainnet. Reports the txHash on Telegram." },
+              { num: "01", title: "Grant",    body: "Sign one MetaMask Advanced Permission — a capped, revocable USDC budget. No private keys, no per-trade popups, no custody." },
+              { num: "02", title: "Allocate", body: "A Fund Manager splits your budget into specialized agents. Each gets its own smart account and an on-chain sub-budget it physically can't exceed." },
+              { num: "03", title: "Execute",  body: "Agents reason with Venice AI and your uploaded playbook, then settle on-chain via the 1Shot relayer — gas paid in USDC. Reports the txHash on Telegram." },
             ].map((s) => (
               <div key={s.num} className="relative flex min-h-[380px] flex-col px-9 py-12" style={{ background: PAPER }}>
                 <div
@@ -431,8 +431,8 @@ export default function LandingPage() {
               {[
                 { d: "Today",      k: "decision", txt: "HOLD — already in best position (Morpho 9.31%)" },
                 { d: "Yesterday",  k: "execute",  txt: "Deposited 0.1 USDC → Morpho @ 9.11%" },
-                { d: "3 days ago", k: "scout",    txt: "Sky APY dropped to 6.1% — flagged for rebalance review" },
-                { d: "4 days ago", k: "observe",  txt: "Tavily news: no exploits or protocol pauses on Base" },
+                { d: "3 days ago", k: "scout",    txt: "Aave APY dropped to 6.1% — flagged for rebalance review" },
+                { d: "4 days ago", k: "observe",  txt: "Playbook rule: skip pools under $5M TVL — held position" },
               ].map((r, i) => (
                 <li
                   key={i}
@@ -472,7 +472,7 @@ export default function LandingPage() {
             <span style={{ fontFamily: "var(--serif)", fontStyle: "italic" }}>capital</span>.
           </h2>
           <p className="mt-6 text-[18px] leading-[1.55] max-w-[60ch]" style={{ color: "#B8B6A8" }}>
-            Visual node graph for every strategy. Watch your agent reason, pay, and execute — without ever seeing a terminal.
+            Visual node graph for every strategy. Watch your agents reason, decide, and execute on-chain — without ever seeing a terminal.
           </p>
 
           {/* 3D-tilted dashboard with flowing edges */}
@@ -480,7 +480,7 @@ export default function LandingPage() {
 
           <div className="grid grid-cols-2 md:grid-cols-4 mt-[60px] border-y" style={{ borderColor: "rgba(255,255,255,0.1)" }}>
             <MetricBlock value={9.31}    decimals={2} unit="%"    label="Best APY on Base"   arrow="↑" first />
-            <MetricBlock value={0.03}    decimals={2} unit="USDC" label="x402 fees / month" />
+            <MetricBlock value={5}       decimals={0} unit=""     label="Specialized agents" />
             <MetricBlock value={3}       decimals={0} unit=""     label="Active runs" />
             <MetricBlock value={Infinity} decimals={0} unit=""    label="Memory depth"      last />
           </div>
@@ -540,7 +540,7 @@ export default function LandingPage() {
               <CloverMark /> CLOVE
             </div>
             <p className="text-[13px] max-w-[32ch] leading-[1.55] mt-3" style={{ color: "#6B6A60" }}>
-              Autonomous DeFi agent OS. Built on Base. Powered by Venice AI, x402, ERC-7715, 1Shot.
+              Autonomous DeFi agent OS. Built on Base + Polygon. Powered by MetaMask Advanced Permissions, 1Shot, and Venice AI.
             </p>
           </div>
           <div className="flex flex-wrap gap-[60px]">
@@ -678,8 +678,8 @@ function StrategyCanvas() {
 
   const nodes = [
     { l: 20,  t: 60,  k: "trigger",       v: "Daily / 09:00" },
-    { l: 220, t: 170, k: "reason · x402", v: "Best APY scan" },
-    { l: 390, t: 290, k: "compare",       v: "Morpho vs Sky" },
+    { l: 220, t: 170, k: "reason",        v: "Best APY scan" },
+    { l: 390, t: 290, k: "compare",       v: "Morpho vs Aave" },
     { l: 470, t: 410, k: "execute",       v: "Morpho deposit" },
   ];
 
@@ -859,9 +859,9 @@ const ORB_STAGES: Array<{ id: OrbState; eyebrow: string; title: React.ReactNode;
   },
   {
     id: "scout",
-    eyebrow: "Stage 01 · scout",
-    title: <>It pays for what it <span style={{ fontFamily: "var(--serif)", fontStyle: "italic" }}>needs</span>.</>,
-    body: "0.01 USDC flows via x402 to Venice AI. Live APYs, market news, risk signals — all in one paid call.",
+    eyebrow: "Stage 01 · scan",
+    title: <>It reads the <span style={{ fontFamily: "var(--serif)", fontStyle: "italic" }}>market</span>.</>,
+    body: "Live APYs, whale flows, and market signals stream in. Venice AI weighs them against your uploaded playbook.",
   },
   {
     id: "reason",
@@ -1017,7 +1017,7 @@ function AgentOrb({ state }: { state: OrbState }) {
       <div className="orb-legend">
         <span className="ld" />
         {state === "rest"    && "Idle"}
-        {state === "scout"   && "Paying Venice via x402"}
+        {state === "scout"   && "Scanning markets with Venice"}
         {state === "reason"  && "Reasoning against memory"}
         {state === "execute" && "Submitting UserOp"}
         {state === "report"  && "Writing memory"}
@@ -1157,8 +1157,8 @@ function DashBoard() {
   const nodes = [
     { id: "trigger",  tag: "trigger",   title: "Daily 09:00",   body: "Cron / Vercel scheduler",  pos: { x: 50,  y: 70  } },
     { id: "budget",   tag: "permission",title: "ERC-7715 Budget",body: "50 USDC · 30 d remaining", pos: { x: 50,  y: 250 } },
-    { id: "scout",    tag: "scout",     title: "Venice AI · x402",body: "Pay 0.01 USDC for yields", pos: { x: 360, y: 70  } },
-    { id: "reason",   tag: "reason",    title: "Compare APY",   body: "morpho > sky > aave",      pos: { x: 360, y: 250, live: true } },
+    { id: "scout",    tag: "scout",     title: "Venice AI scan", body: "Live yields + signals",    pos: { x: 360, y: 70  } },
+    { id: "reason",   tag: "reason",    title: "Compare APY",   body: "morpho > aave > comp",     pos: { x: 360, y: 250, live: true } },
     { id: "execute",  tag: "execute",   title: "Morpho Deposit",body: "0.1 USDC → vault",         pos: { x: 720, y: 160 } },
     { id: "notify",   tag: "notify",    title: "Telegram alert",body: "tx 0x4a8b…",               pos: { x: 720, y: 360 } },
   ] as const;
@@ -1439,30 +1439,11 @@ function LidoLogo() {
   );
 }
 
-function SkyLogo() {
-  return (
-    <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
-      {/* Sky / DAI S */}
-      <text x="4" y="14" fontSize="13" fontWeight="700" fill="white" fontFamily="sans-serif">S</text>
-    </svg>
-  );
-}
-
 function VeniceLogo() {
   return (
     <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
       {/* V mark */}
       <path d="M2 3L9 15L16 3" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" fill="none" />
-    </svg>
-  );
-}
-
-function TavilyLogo() {
-  return (
-    <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
-      {/* Search / compass T */}
-      <circle cx="8.5" cy="8.5" r="5.5" stroke="white" strokeWidth="1.6" fill="none" />
-      <path d="M12.5 12.5L16 16" stroke="white" strokeWidth="1.8" strokeLinecap="round" />
     </svg>
   );
 }
@@ -1497,12 +1478,30 @@ function OneShotLogo() {
   );
 }
 
-function X402Logo() {
+function AaveLogo() {
   return (
     <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
-      {/* HTTP 402 payment mark */}
-      <text x="2" y="11" fontSize="9" fontWeight="700" fill="#C8FF3D" fontFamily="monospace">402</text>
-      <path d="M2 13H16" stroke="#C8FF3D" strokeWidth="1.2" strokeDasharray="2 2" />
+      <circle cx="9" cy="9" r="7" stroke="white" strokeWidth="1.3" opacity="0.85" />
+      <path d="M9 5L12 13H10.4L9.8 11.3H8.2L7.6 13H6L9 5Z" fill="white" opacity="0.9" />
+      <rect x="8.5" y="9" width="1" height="1" fill="white" />
+    </svg>
+  );
+}
+
+function PolymarketLogo() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+      <rect x="2.5" y="2.5" width="13" height="13" rx="3" stroke="white" strokeWidth="1.3" opacity="0.85" />
+      <path d="M6 11L8 7L10 9.5L12.5 6" stroke="white" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function PolygonLogo() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+      <path d="M9 3L14.5 6.2V12.8L9 16L3.5 12.8V6.2L9 3Z" stroke="white" strokeWidth="1.2" opacity="0.85" />
+      <path d="M9 6.5L11.8 8.1V11.3L9 12.9L6.2 11.3V8.1L9 6.5Z" fill="white" opacity="0.7" />
     </svg>
   );
 }

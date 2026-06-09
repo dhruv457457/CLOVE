@@ -317,17 +317,10 @@ function IntelligenceCard({ intelligence }: { intelligence: AgentHandoffPacket["
         <div style={{ fontSize: 11, color: SCOUT_CLR, fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>{intelligence.bestApy.toFixed(2)}%</div>
         <div style={{ fontSize: 11, color: TEXT2 }}>Recommended</div>
         <div style={{ fontSize: 11, color: TEXT }}>{intelligence.recommended}</div>
-        <div style={{ fontSize: 11, color: TEXT2 }}>x402 Cost</div>
-        <div style={{ fontSize: 11, color: TEXT, fontVariantNumeric: "tabular-nums" }}>${intelligence.x402Cost.toFixed(4)}</div>
       </div>
       {intelligence.reason && (
         <div style={{ marginTop: 8, fontSize: 11, color: TEXT2, fontStyle: "italic", fontFamily: "var(--serif)", lineHeight: 1.5 }}>
           &ldquo;{intelligence.reason.slice(0, 200)}&rdquo;
-        </div>
-      )}
-      {intelligence.x402Receipt && (
-        <div style={{ marginTop: 6, fontSize: 9.5, color: MID }}>
-          x402 receipt: <span style={{ fontFamily: "monospace", color: SCOUT_CLR + "cc" }}>{intelligence.x402Receipt.slice(0, 24)}…</span>
         </div>
       )}
     </div>
@@ -558,7 +551,7 @@ function AgentConversationTimeline({ live, history, agents }: TimelineProps) {
         }}>
           <Zap size={28} color={MID} strokeWidth={1.2} />
           <div style={{ fontSize: 13, fontStyle: "italic", textAlign: "center", lineHeight: 1.6, maxWidth: 320 }}>
-            No A2A runs yet. Click <span style={{ color: ACCENT }}>Run Orchestrated</span> in the toolbar to start the Scout → Risk → Executor pipeline.
+            No A2A runs yet. Click <span style={{ color: ACCENT }}>Run Orchestrated</span> in the toolbar to start the Fund Manager → workers pipeline.
           </div>
         </div>
       )}
@@ -901,20 +894,6 @@ export default function WorkflowDetailPage() {
     }
   }, [live.phase, workflowId, loadWorkflow, loadHistory, loadHandoffs]);
 
-  // Auto-start the orchestrated run when arriving via "Run Team" (?run=1).
-  // Fires once, after agents have loaded, then strips the query param so a
-  // refresh doesn't re-trigger it.
-  useEffect(() => {
-    if (autoRunFired.current) return;
-    if (searchParams.get("run") !== "1") return;
-    if (agents.length === 0) return;
-    if (live.phase !== "idle") return;
-    autoRunFired.current = true;
-    setTab("timeline");
-    runOrchestrated();
-    router.replace(`/dashboard/workflow/${workflowId}`);
-  }, [searchParams, agents, live.phase, runOrchestrated, router, workflowId]);
-
   // Reset live state to allow new run
   const resetLive = () => {
     readerRef.current?.cancel();
@@ -951,6 +930,21 @@ export default function WorkflowDetailPage() {
   const isOrchestrated = agents.length === 3; // 3-agent workflow = Scout/Risk/Executor
   const isLiveRunning  = live.phase !== "idle" && live.phase !== "complete" && live.phase !== "failed";
   const canRun         = isOrchestrated ? !isLiveRunning : !running && agents.length > 0;
+
+  // Auto-start a run when arriving via "Run Team" (?run=1). A 3-agent team runs
+  // the orchestrated A2A timeline; a solo/2-agent workflow runs the single-agent
+  // path (calling runOrchestrated on a solo agent 400s). Fires once, then strips
+  // the query param so a refresh doesn't re-trigger it.
+  useEffect(() => {
+    if (autoRunFired.current) return;
+    if (searchParams.get("run") !== "1") return;
+    if (agents.length === 0) return;
+    if (live.phase !== "idle") return;
+    autoRunFired.current = true;
+    if (isOrchestrated) { setTab("timeline"); runOrchestrated(); }
+    else                { runSingle(); }
+    router.replace(`/dashboard/workflow/${workflowId}`);
+  }, [searchParams, agents, live.phase, isOrchestrated, runOrchestrated, runSingle, router, workflowId]);
 
   if (!workflow) {
     return (

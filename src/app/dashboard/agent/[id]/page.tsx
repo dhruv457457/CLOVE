@@ -333,6 +333,7 @@ export default function AgentInnerCanvasPage() {
         }}
       >
         <AgentIdentityCard agentId={agentId} agent={agent} refreshKey={refreshKey} />
+        <KnowledgePanel agentId={agentId} />
       </aside>
     </div>
   );
@@ -362,4 +363,70 @@ function hydrateCanvas(
     }));
   setNodes(nodes);
   setEdges(edges);
+}
+
+// ── Knowledge panel (RAG) ─────────────────────────────────────────────────────
+
+function KnowledgePanel({ agentId }: { agentId: string }) {
+  const [text, setText]   = useState("");
+  const [items, setItems] = useState<{ text: string }[]>([]);
+  const [saving, setSaving] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      const r = await fetch(`/api/agent/${agentId}/knowledge`);
+      if (r.ok) setItems(((await r.json()).items ?? []) as { text: string }[]);
+    } catch { /* ignore */ }
+  }, [agentId]);
+  useEffect(() => { load(); }, [load]);
+
+  const save = async () => {
+    if (!text.trim()) return;
+    setSaving(true);
+    try {
+      await fetch(`/api/agent/${agentId}/knowledge`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+      setText("");
+      await load();
+    } finally { setSaving(false); }
+  };
+
+  const clear = async () => {
+    await fetch(`/api/agent/${agentId}/knowledge`, { method: "DELETE" });
+    await load();
+  };
+
+  return (
+    <div style={{ marginTop: 20, paddingTop: 18, borderTop: `1px solid ${LINE}` }}>
+      <div style={{ fontSize: 10.5, color: MID, letterSpacing: "0.06em", marginBottom: 8 }}>KNOWLEDGE · your playbook</div>
+      <textarea
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        placeholder="Rules the agent must follow. e.g. 'Never touch memecoins. Only blue-chip protocols. Max 30% in any one position.'"
+        rows={4}
+        style={{ width: "100%", background: INK_1, border: `1px solid ${LINE}`, borderRadius: 8, padding: "10px 11px", color: TEXT, fontSize: 12, fontFamily: "var(--sans)", resize: "none", lineHeight: 1.5, outline: "none" }}
+      />
+      <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+        <button onClick={save} disabled={saving || !text.trim()}
+          style={{ flex: 1, padding: "8px 12px", borderRadius: 7, background: ACCENT, color: INK, border: "none", fontWeight: 600, fontSize: 12, cursor: saving || !text.trim() ? "not-allowed" : "pointer", opacity: saving || !text.trim() ? 0.5 : 1 }}>
+          {saving ? "Embedding…" : "Add to knowledge"}
+        </button>
+        {items.length > 0 && (
+          <button onClick={clear} style={{ padding: "8px 12px", borderRadius: 7, background: "transparent", border: `1px solid ${LINE}`, color: TEXT2, fontSize: 12, cursor: "pointer" }}>Clear</button>
+        )}
+      </div>
+      {items.length > 0 && (
+        <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 6 }}>
+          <div style={{ fontSize: 10, color: MID }}>{items.length} chunk{items.length !== 1 ? "s" : ""} stored — injected before every decision</div>
+          {items.slice(0, 6).map((it, i) => (
+            <div key={i} style={{ fontSize: 11, color: TEXT2, background: INK_1, border: `1px solid ${LINE}`, borderRadius: 6, padding: "7px 9px", lineHeight: 1.4 }}>
+              {it.text.slice(0, 140)}{it.text.length > 140 ? "…" : ""}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }

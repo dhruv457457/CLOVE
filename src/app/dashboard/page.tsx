@@ -258,7 +258,7 @@ function AgentNode({
             border: "1px solid rgba(200,255,61,0.18)",
             fontSize: 9.5, color: ACCENT, letterSpacing: "0.04em", textTransform: "lowercase",
           }}>
-            <span style={{ fontSize: 8 }}>x402</span> · venice
+            venice ai
           </span>
         </div>
       )}
@@ -755,9 +755,31 @@ const loadAgents = useCallback(async () => {
   const bindPermissionToPendingAgents = useCallback(async () => {
     const perm = metamaskStore.getState().permission;
     if (!perm?.permissionsContext) return;
-
-    // Always use the latest agents list (caller may have just created new ones)
     const wallet = metamaskStore.getState().userAddress;
+
+    // FUND MANAGER grant → allocate REAL scoped, on-chain-capped chains per worker
+    // (true A2A). Do NOT flat-bind the root to every agent — that erases caps.
+    try {
+      const r = await fetch("/api/session/address?role=fund-manager");
+      const fmAddr = ((await r.json()).address as string ?? "").toLowerCase();
+      if (wallet && (perm.grantedTo as string | undefined)?.toLowerCase() === fmAddr) {
+        const alloc = await fetch("/api/agent/allocate-fund-manager", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            walletAddress:      wallet,
+            permissionsContext: perm.permissionsContext,
+            delegationManager:  perm.delegationManager,
+          }),
+        });
+        const ad = await alloc.json() as { allocated?: number };
+        await loadAgents();
+        if ((ad.allocated ?? 0) > 0) toast(`${ad.allocated} worker${ad.allocated! > 1 ? "s" : ""} on-chain-capped ✓`, "success");
+        return;
+      }
+    } catch { /* fall through to flat binding */ }
+
+    // Legacy relayer grant → flat-bind the root context to each pending agent.
     let latestAgents = agents;
     if (wallet) {
       try {
@@ -859,13 +881,51 @@ const loadAgents = useCallback(async () => {
         freshPerm.permissionsContext.startsWith("0x")
       );
 
-      if (!hasFreshRealPerm) {
+      // MULTI-AGENT TEAM → TRUE A2A: the Fund Manager holds the grant and
+      // redelegates a scoped, on-chain-capped slice to each worker. We must NOT
+      // flat-bind the root permission to every agent (that erases the per-worker
+      // caps), so teams take the Fund Manager path regardless of an existing perm.
+      if (data.wired) {
+        const budget = String((answersObj.budget as number | string | undefined) ?? 10);
+        try {
+          let fmAddr = "";
+          try {
+            const r = await fetch("/api/session/address?role=fund-manager");
+            fmAddr = ((await r.json()).address as string ?? "").toLowerCase();
+          } catch { /* ignore */ }
+          const haveFmGrant = hasFreshRealPerm &&
+            (freshPerm!.grantedTo as string | undefined)?.toLowerCase() === fmAddr;
+
+          if (haveFmGrant) {
+            // Already granted to the Fund Manager — just (re)allocate scoped caps.
+            const alloc = await fetch("/api/agent/allocate-fund-manager", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                walletAddress:      wallet,
+                permissionsContext: freshPerm!.permissionsContext,
+                delegationManager:  freshPerm!.delegationManager,
+              }),
+            });
+            const ad = await alloc.json() as { allocated?: number };
+            await loadAgents();
+            toast(`Team live · ${ad.allocated ?? 0} workers on-chain-capped ✓`, "success");
+          } else {
+            // Grant to the Fund Manager + allocate per-worker capped budgets.
+            const n = await metamaskStore.requestFundManagerGrant(budget, 90);
+            await loadAgents();
+            if (n && n > 0) toast(`Team live · Fund Manager capped ${n} workers on-chain ✓`, "success");
+            else            toast("Grant the Fund Manager permission to activate the team.", "info");
+          }
+        } catch (e) {
+          toast("Team created — allocation failed: " + (e instanceof Error ? e.message : String(e)), "error");
+        }
+      } else if (!hasFreshRealPerm) {
         setPostCreateAgentCount(agentCount);
-        setPostCreatePermOpen(true);   // triggers Step 3 modal
+        setPostCreatePermOpen(true);   // single agent → Step 3 relayer grant
       } else {
         await bindPermissionToPendingAgents();
-        if (data.wired && data.chain) toast(`Team live: ${data.chain} ✓`, "success");
-        else                          toast("Agent created and activated ✓", "success");
+        toast("Agent created and activated ✓", "success");
       }
     } catch (e) {
       toast("Failed to create agent: " + (e instanceof Error ? e.message : String(e)), "error");
@@ -1048,7 +1108,7 @@ const loadAgents = useCallback(async () => {
         <button
           onClick={runTeam}
           disabled={teamRunning}
-          title="Run the whole workflow once: Scouts → Analyzer → Risk → Executor"
+          title="Run the whole workflow once: Fund Manager → specialized workers"
           style={{
             display: "inline-flex", alignItems: "center", gap: 6,
             padding: "5px 12px", borderRadius: 6,
@@ -1476,7 +1536,7 @@ const SCHEDULE_OPTIONS: Array<{ label: string; ms: number | null; desc: string }
   { label: "Off",          ms: null,                       desc: "Manual only — no autonomous runs" },
   { label: "Every hour",   ms: 60 * 60 * 1000,             desc: "High-frequency · best for active trading" },
   { label: "Every 6 hours",ms: 6 * 60 * 60 * 1000,         desc: "Balanced · good for most strategies" },
-  { label: "Daily",        ms: 24 * 60 * 60 * 1000,        desc: "Default · low x402 spend" },
+  { label: "Daily",        ms: 24 * 60 * 60 * 1000,        desc: "Default · low cost" },
   { label: "Weekly",       ms: 7 * 24 * 60 * 60 * 1000,    desc: "Maintenance only" },
 ];
 
@@ -1776,12 +1836,6 @@ function HistoryDrawer({
             </span>
           </div>
           <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
-            <span style={{ color: MID }}>x402 spent</span>
-            <span style={{ color: (agent.x402SpentUsdc ?? 0) > 0 ? ACCENT : MID }}>
-              ${(agent.x402SpentUsdc ?? 0).toFixed(3)}
-            </span>
-          </div>
-          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
             <span style={{ color: MID }}>Runs</span>
             <span>{agent.totalRuns}</span>
           </div>
@@ -1833,18 +1887,6 @@ function HistoryDrawer({
                 >
                   ↗ {t.txHash.slice(0, 10)}…{t.txHash.slice(-6)} · Basescan
                 </a>
-              )}
-
-              {/* UX-4: x402 cost chip */}
-              {t.cost !== undefined && t.cost > 0 && (
-                <span style={{
-                  display: "inline-flex", alignItems: "center", gap: 4, marginTop: 5, marginLeft: t.txHash ? 4 : 0,
-                  fontSize: 9.5, color: MID,
-                  background: "rgba(244,241,234,0.04)", border: `1px solid ${LINE}`,
-                  padding: "2px 6px", borderRadius: 4,
-                }}>
-                  x402 ${t.cost.toFixed(4)}
-                </span>
               )}
 
               {/* timestamp */}
@@ -2279,7 +2321,7 @@ function QuestionnaireModal({
         {/* Footer */}
         <div style={{ padding: "16px 28px", borderTop: `1px solid ${LINE}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <span style={{ fontSize: 11, color: MID }}>
-            {(answers.orchestration as string | undefined)?.includes("Multi") ? "⚡ Will create Scout → Risk Monitor → Executor team" : ""}
+            {(answers.orchestration as string | undefined)?.includes("Multi") ? "⚡ Will create a Fund Manager → specialized workers (each on-chain-capped)" : ""}
           </span>
           <div style={{ display: "flex", gap: 10 }}>
             <button
@@ -2451,7 +2493,13 @@ function PermGrantModal({ onClose, onGranted }: { onClose: () => void; onGranted
   const grant = async () => {
     setGranting(true);
     try {
-      await metamaskStore.requestPermission(budget, days, `CLOVE agent budget — ${budget} USDC / ${days} days`);
+      // Grant to the FUND MANAGER (true A2A): it redelegates a scoped, on-chain-
+      // capped slice to each worker. Falls back to a flat grant only if the FM
+      // address can't be resolved.
+      const n = await metamaskStore.requestFundManagerGrant(budget, days);
+      if (n === null) {
+        await metamaskStore.requestPermission(budget, days, `CLOVE agent budget — ${budget} USDC / ${days} days`);
+      }
       setDone(true);
       setTimeout(onGranted, 800);
     } catch {
@@ -2523,7 +2571,7 @@ function PermGrantModal({ onClose, onGranted }: { onClose: () => void; onGranted
         <div style={{ fontSize: 13, color: TEXT2, lineHeight: 1.6 }}>
           {hasExisting
             ? "You can grant a new permission below to replace the current one, or use the buttons above to clear / revoke it."
-            : <>This creates an <strong style={{ color: TEXT }}>ERC-7715 periodic permission</strong> from your MetaMask wallet to CLOVE&apos;s 1Shot server wallet. Your USDC only moves when an agent executes — revocable anytime.</>
+            : <>This creates an <strong style={{ color: TEXT }}>ERC-7715 periodic permission</strong> from your MetaMask wallet to CLOVE&apos;s <strong style={{ color: TEXT }}>Fund Manager</strong>, which splits it into scoped, on-chain-capped budgets for each worker agent. Your USDC only moves when an agent executes — revocable anytime.</>
           }
         </div>
 
@@ -2551,9 +2599,10 @@ function PermGrantModal({ onClose, onGranted }: { onClose: () => void; onGranted
 
         <div style={{ padding: "12px 14px", borderRadius: 9, background: "rgba(200,255,61,0.06)", border: "1px solid rgba(200,255,61,0.15)", fontSize: 11.5, color: TEXT2, lineHeight: 1.5 }}>
           {/* Bug 3 fix: explicitly distinguish budget period from permission expiry */}
-          Agent can spend up to <strong style={{ color: ACCENT }}>{budget} USDC every {days} days</strong>.
-          {" "}Permission valid for <strong style={{ color: TEXT }}>90 days</strong> (shown in top bar as days remaining).
-          {" "}Gas is sponsored by 1Shot — you pay zero ETH.
+          Fund Manager budget: <strong style={{ color: ACCENT }}>{budget} USDC every {days} days</strong>, split into
+          {" "}per-worker caps enforced on-chain (overspend reverts).
+          {" "}Permission valid for <strong style={{ color: TEXT }}>90 days</strong>.
+          {" "}Gas paid in USDC via 1Shot — you pay zero ETH.
         </div>
 
         <button

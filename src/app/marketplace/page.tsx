@@ -143,7 +143,7 @@ export default function Marketplace() {
             </span>
           </h1>
           <p className="text-sm leading-6 text-[#B5B2A5]">
-            Browse community-scouted autonomous strategies. All blueprints are non-custodial and deploy in one click via ERC-7715 and x402.
+            Browse community-scouted autonomous strategies. All blueprints are non-custodial and deploy in one click via ERC-7715 delegation.
           </p>
         </div>
 

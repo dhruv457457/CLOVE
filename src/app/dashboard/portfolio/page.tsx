@@ -256,9 +256,9 @@ function PortfolioTab({ pf }: { pf: Portfolio }) {
           <Sparkline points={spark} color={pnlUp ? "#C8FF3D" : "#FF6B5E"} />
         </div>
         <div className="hero-stat" ref={r2 as React.RefObject<HTMLDivElement>}>
-          <span className="lab">Total spent · x402 + 1Shot</span>
+          <span className="lab">Total spent · intel + 1Shot</span>
           <span className="big"><span className="pre">$</span>{money(pf.spend.total, 2)}</span>
-          <span className="delta flat">x402 ${money(pf.spend.x402Total, 2)} · 1Shot ${money(pf.spend.oneShotFees, 3)}</span>
+          <span className="delta flat">intel ${money(pf.spend.x402Total, 2)} · 1Shot ${money(pf.spend.oneShotFees, 3)}</span>
           <Sparkline points={[2,5,3,8,6,11,9,14,12,18,16,21]} color="#F2B85C" />
         </div>
       </div>
@@ -330,7 +330,7 @@ function PortfolioTab({ pf }: { pf: Portfolio }) {
           {bestPos && <div className="mini-row"><span className="k">Best position · {bestPos.protocol}</span><span className="mv">{bestPos.entryApy}%</span></div>}
         </div>
         <div className="card">
-          <div className="card-head"><span className="ct">x402 spend breakdown</span><span className="ch-right">${money(pf.spend.x402Total, 2)} total</span></div>
+          <div className="card-head"><span className="ct">Intel spend breakdown</span><span className="ch-right">${money(pf.spend.x402Total, 2)} total</span></div>
           <div className="mini-row"><span className="k">Intelligence (DeFiLlama + Venice)</span><span className="mv">${money(pf.spend.x402Intel, 4)}</span></div>
           <div className="mini-row"><span className="k">Text-to-speech (Venice TTS)</span><span className="mv">${money(pf.spend.x402Tts, 4)}</span></div>
           <div className="mini-row"><span className="k">Image generation</span><span className="mv">${money(pf.spend.x402Image, 4)}</span></div>
@@ -567,7 +567,7 @@ function StatStrip({ pf }: { pf: Portfolio }) {
         <span className="sub">{pf.agents.length - active} idle</span>
       </div>
       <div className="stat-tile" ref={r4 as React.RefObject<HTMLDivElement>}>
-        <span className="lab">x402 paid</span>
+        <span className="lab">Intel paid</span>
         <span className="v"><span className="pre">$</span>{v4}</span>
         <span className="sub">+ ${money(pf.spend.oneShotFees, 3)} 1Shot</span>
       </div>
