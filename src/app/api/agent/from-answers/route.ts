@@ -122,7 +122,7 @@ export async function POST(request: NextRequest) {
   // ── Build enriched goal ────────────────────────────────────────────────────
   // LLM-5 fix: "Aave" is not in executeDefi's protocol enum — use only valid protocols
   const protoList  = protocols.length > 0 ? protocols.join(", ") : "Morpho, Aave, Lido";
-  const notifyMode = notify.includes("Voice note (x402 TTS)") ? "every-run"
+  const notifyMode = notify.includes("Voice note") ? "every-run"
                    : notify.includes("Strategy image")        ? "milestones"
                    : notify.includes("Silent")                ? "off"
                    :                                            "milestones";
@@ -179,6 +179,7 @@ export async function POST(request: NextRequest) {
   // before they are created. No demo mode, no 0xdemo fallback.
   let effectivePermContext = permissionsContext;
   let effectiveDelegationManager = delegationManager;
+  let effectiveGrantedTo: string | undefined;
 
   if (!effectivePermContext || effectivePermContext.length < 40 || effectivePermContext.includes("demo")) {
     try {
@@ -191,9 +192,22 @@ export async function POST(request: NextRequest) {
           && !(stored.permissionsContext as string).includes("demo")) {
         effectivePermContext       = stored.permissionsContext as string;
         effectiveDelegationManager = (stored.delegationManager as string) ?? delegationManager;
+        effectiveGrantedTo         = stored.grantedTo as string | undefined;
       }
     } catch { /* non-fatal */ }
   }
+
+  // Is the active grant a FUND MANAGER grant (user → CLOVE session account)?
+  // If so, we can redelegate REAL on-chain-capped scoped slices to each worker
+  // (user → session → worker → relayer). Otherwise the grant went straight to
+  // the relayer (working single-hop flow) and we keep the existing behaviour.
+  let isFundManagerGrant = false;
+  try {
+    if (effectiveGrantedTo) {
+      const { getSessionEoaAddress } = await import("@/lib/web3/serverSession");
+      isFundManagerGrant = effectiveGrantedTo.toLowerCase() === getSessionEoaAddress().toLowerCase();
+    }
+  } catch { /* non-fatal — default to legacy behaviour */ }
 
   const _isRealPerm = !!(
     effectivePermContext &&
@@ -320,6 +334,9 @@ export async function POST(request: NextRequest) {
   let riskGoal: string;
   let executorName: string;
   let executorGoal: string;
+  // Protocols a SPENDING worker may touch — used to scope its on-chain
+  // AllowedTargetsEnforcer caveat when redelegating from the Fund Manager.
+  let workerProtocols: string[] = ["morpho", "aave"];
 
   if (agentType === "copy-trader") {
     // Two modes, auto-selected:
@@ -371,9 +388,12 @@ export async function POST(request: NextRequest) {
       `${prompt.trim()} ` +
       `Mirror the trade approved by the Risk Monitor using checkRisk then executeCopyTrade. ${scheduleClause} ` +
       (notify.includes("Telegram message") ? "Report every copied trade via Telegram." : "");
+    workerProtocols = ["uniswap", "aerodrome"]; // copy-trade mirrors via DEX swaps
   } else {
     // yield / rebalancer → one scout per protocol.
     const scoutProtocols = protocols.length > 0 ? protocols : ["Morpho", "Aave", "Lido"];
+    // Scope the spending worker to the team's protocols (lowercased registry keys).
+    workerProtocols = scoutProtocols.map(p => p.toLowerCase());
     scoutUnits = scoutProtocols.map(proto => ({
       name:  `${proto} Scout`,
       badge: proto,
@@ -399,8 +419,9 @@ export async function POST(request: NextRequest) {
       (notify.includes("Telegram message") ? "Report every decision via Telegram." : "");
   }
 
-  // Vertical layout for the scout column, with the decision chain centered.
-  const SCOUT_X   = 60;
+  // Layout: Fund Manager (root) → scout column → Analyzer → Risk → Executor.
+  const FM_X      = 40;
+  const SCOUT_X   = 360;
   const SCOUT_Y0  = 40;
   const SCOUT_DY  = 150;
   const centerY   = SCOUT_Y0 + ((scoutUnits.length - 1) * SCOUT_DY) / 2;
@@ -408,21 +429,28 @@ export async function POST(request: NextRequest) {
   const UNSIGNED_HASH = "0xunsigned";
   const hasRealPermission = _isRealPerm;
 
-  // 1. Convergence Analyzer/Detector — delegation root + aggregator.
-  const analyzer = await createAgent({
+  // 0. FUND MANAGER — the team root. Holds the user's ERC-7715 grant and
+  //    redelegates scoped, on-chain-capped budgets down to each worker. This is
+  //    the orchestrator node users see at the head of the team.
+  const fundManager = await createAgent({
     walletAddress,
-    name:        analyzerName,
-    goal:        analyzerGoal,
+    name:        "Fund Manager",
+    goal:
+      `You are the Fund Manager for this strategy. You hold the user's single capped ERC-7715 budget ` +
+      `(${budget} USDC) and split it into scoped, on-chain-enforced sub-budgets for each worker agent. ` +
+      `Dispatch the protocol scouts, collect their findings, and route the approved allocation to the ` +
+      `executor — every worker can only spend within the cap you grant it (overspend reverts on-chain).`,
     budgetUsdc:  budget,
     mediaPolicy: "off",
-    position:    { x: 420, y: centerY },
+    position:    { x: FM_X, y: centerY },
     workflowId:  workflow.id,
     agentType,
+    typeConfig:  { role: "fund-manager" },
   });
-  await addAgentToWorkflow(workflow.id, analyzer.id);
+  await addAgentToWorkflow(workflow.id, fundManager.id);
 
-  // Bind root permission to the Analyzer.
-  await setDelegation(analyzer.id, {
+  // The Fund Manager holds the ROOT grant (it is the delegator, not a delegate).
+  await setDelegation(fundManager.id, {
     parentAgentId:            null,
     delegationContext:        hasRealPermission ? effectivePermContext! : "0xdemo",
     delegationHash:           hasRealPermission ? "0xpending" : UNSIGNED_HASH,
@@ -430,7 +458,29 @@ export async function POST(request: NextRequest) {
     delegationCap:            budget,
   });
 
-  // 2. Scouts — one per unit, research-only (no spend), children of Analyzer.
+  // 1. Convergence Analyzer/Detector — aggregator, child of the Fund Manager.
+  const analyzer = await createAgent({
+    walletAddress,
+    name:        analyzerName,
+    goal:        analyzerGoal,
+    budgetUsdc:  budget,
+    mediaPolicy: "off",
+    position:    { x: 680, y: centerY },
+    workflowId:  workflow.id,
+    agentType,
+  });
+  await addAgentToWorkflow(workflow.id, analyzer.id);
+
+  // Analyzer is a decision agent under the Fund Manager.
+  await setDelegation(analyzer.id, {
+    parentAgentId:            fundManager.id,
+    delegationContext:        hasRealPermission ? effectivePermContext! : "0xdemo",
+    delegationHash:           hasRealPermission ? "0xpending" : UNSIGNED_HASH,
+    delegationManagerAddress: hasRealPermission ? effectiveDelegationManager! : "0x",
+    delegationCap:            budget,
+  });
+
+  // 2. Scouts — one per unit, research-only (no spend), children of Fund Manager.
   const scouts: Awaited<ReturnType<typeof createAgent>>[] = [];
   for (let i = 0; i < scoutUnits.length; i++) {
     const unit = scoutUnits[i];
@@ -445,10 +495,10 @@ export async function POST(request: NextRequest) {
       agentType:   scoutAgentType,
     });
     await addAgentToWorkflow(workflow.id, scout.id);
-    // Research-only: parented to the Analyzer for orchestration, but capped to 0
+    // Research-only: dispatched by the Fund Manager, but capped to 0
     // (honest non-spending sentinel — marked "pending", can never transact).
     await setDelegation(scout.id, {
-      parentAgentId:            analyzer.id,
+      parentAgentId:            fundManager.id,
       delegationContext:        "0xresearch-only",
       delegationHash:           UNSIGNED_HASH,
       delegationManagerAddress: "0x",
@@ -457,11 +507,39 @@ export async function POST(request: NextRequest) {
     scouts.push(scout);
   }
 
-  // Helper: build a real scoped sub-delegation from a parent context to a child.
+  // Helper: build a scoped sub-delegation for a SPENDING worker.
+  //
+  // FUND MANAGER grant (user → session): build the REAL on-chain-capped chain
+  //   user → session → worker → relayer via buildRedeemableWorkerChain. The
+  //   worker's ERC20TransferAmountEnforcer reverts any overspend. This is the
+  //   real A2A path.
+  //
+  // RELAYER grant (legacy single-hop) OR any failure: fall back to the parent
+  //   context so the spender stays executable (working flow preserved).
   async function buildSubContext(parentCtx: string, childAgent: Awaited<ReturnType<typeof createAgent>>): Promise<{ context: string; hash: string }> {
     if (!hasRealPermission || parentCtx === "0xdemo") {
       return { context: "0xdemo", hash: UNSIGNED_HASH };
     }
+
+    if (isFundManagerGrant) {
+      try {
+        const { buildRedeemableWorkerChain } = await import("@/lib/web3/subDelegation");
+        const chain = await buildRedeemableWorkerChain(
+          effectivePermContext!,      // the FM grant is always the chain ROOT
+          childAgent.id,
+          workerProtocols,
+          Number(budget),
+          typeDef.chainId,
+        );
+        console.log(`[from-answers] scoped worker chain for ${childAgent.name}: cap ${budget} USDC, targets ${chain.allowedTargets.length}`);
+        return { context: chain.context, hash: chain.scopedHash };
+      } catch (e) {
+        console.warn("[from-answers] buildRedeemableWorkerChain failed — falling back to root context:", e);
+        return { context: effectivePermContext!, hash: "0xpending" };
+      }
+    }
+
+    // Legacy relayer grant — keep the proven single-hop behaviour.
     try {
       const { redelegatePermissionContextOnce } = await import("@/lib/oneshot/agentWallet");
       const { agentOnChainAddress } = await import("@/lib/agent/agents");
@@ -474,12 +552,6 @@ export async function POST(request: NextRequest) {
       };
     } catch (e) {
       console.warn("[from-answers] sub-delegation failed — falling back to parent context so the spender stays executable:", e);
-      // 1Shot redelegation is unavailable (it 500s). Rather than blocking the
-      // whole chain (which leaves the Executor unable to ever transact), fall
-      // back to the PARENT context. The redeemer is always CLOVE's 1Shot wallet,
-      // so the root ERC-7715 context is still valid for execution — we just lose
-      // per-agent scope isolation until redelegation is fixed. This mirrors the
-      // runtime behaviour of liveRedelegate() in the orchestrate route.
       return { context: parentCtx, hash: "0xpending" };
     }
   }
@@ -491,7 +563,7 @@ export async function POST(request: NextRequest) {
     goal:        riskGoal,
     budgetUsdc:  budget,
     mediaPolicy: "off",
-    position:    { x: 760, y: centerY },
+    position:    { x: 1000, y: centerY },
     workflowId:  workflow.id,
     agentType,
   });
@@ -518,7 +590,7 @@ export async function POST(request: NextRequest) {
     scheduleIntervalMs,  // only the Executor runs on schedule; the rest are invoked around it
     workflowId:  workflow.id,
     mediaPolicy,
-    position:    { x: 1100, y: centerY },
+    position:    { x: 1320, y: centerY },
     agentType,
   });
   await addAgentToWorkflow(workflow.id, executor.id);
@@ -533,10 +605,10 @@ export async function POST(request: NextRequest) {
   });
 
   return NextResponse.json({
-    agents:   [...scouts, analyzer, riskMonitor, executor],
+    agents:   [fundManager, ...scouts, analyzer, riskMonitor, executor],
     workflow,
     wired:    true,
-    chain:    `${scouts.length} scouts → ${analyzer.name} → ${riskMonitor.name} → ${executor.name}`,
+    chain:    `${fundManager.name} → ${scouts.length} scouts → ${analyzer.name} → ${riskMonitor.name} → ${executor.name}`,
   });
 }
 

@@ -4,10 +4,12 @@ import { getAgent, bumpAgentCounters, transitionAgent, type Agent } from "@/lib/
 import { veniceGeneratePlan, veniceReflect, imagePromptForReflection, type Plan, type SubGoal, type Reflection } from "@/lib/agent/planner";
 import { buildMemoryPrompt, saveRun, saveInsight, updatePosition } from "@/lib/agent/memory";
 import { getRelevantInsights } from "@/lib/agent/semantic-memory";
+import { getRelevantKnowledge, formatKnowledgeForPrompt } from "@/lib/agent/knowledge";
 import { embedText } from "@/lib/agent/embeddings";
 import { registerAgentOnChain } from "@/lib/agent/identity";
 import { updateAgent } from "@/lib/agent/agents";
 import { saveThought, generateThoughtId, generateRunId, type ThoughtType } from "@/lib/agent/thoughts";
+import { internalHeaders } from "@/lib/auth/internal";
 import { TOOL_DEFINITIONS, executeTool, type ToolCallResult, type ExecutorContext } from "@/lib/agent/tools";
 import { getVeniceClient } from "@/lib/venice/client";
 
@@ -116,8 +118,11 @@ export async function POST(request: NextRequest) {
         // Pull memory + semantically-relevant insights (cross-agent via team scope)
         // MEM-1 fix: pass agentId so each agent in a team sees only its own history
         const memoryPrompt = await buildMemoryPrompt(agent.walletAddress, agent.id);
+        // RAG: inject the user's uploaded playbook/rules relevant to this goal.
+        const knowledge    = await getRelevantKnowledge(agent.id, agent.goal, 5);
+        const fullMemory   = memoryPrompt + formatKnowledgeForPrompt(knowledge);
         const insights     = await getRelevantInsights(agent.id, agent.walletAddress, agent.goal, 6);
-        const plan: Plan   = await veniceGeneratePlan(agent.goal, memoryPrompt, insights, agent.agentType);
+        const plan: Plan   = await veniceGeneratePlan(agent.goal, fullMemory, insights, agent.agentType);
 
         const planId = await emit("plan", {
           reasoning: plan.reasoning,
@@ -130,15 +135,18 @@ export async function POST(request: NextRequest) {
         await bumpAgentCounters(agent.id, { status: "executing" });
         send("status", { phase: "executing" });
 
-        // Resolve permissionsContext: body (from dashboard store) → agent DB → undefined
-        // The dashboard store may be empty if the user deleted/cleared the local permission,
-        // but the agent's DB record still has a real delegationContext. Always use the
-        // DB context as authoritative fallback so runs don't silently fail with 400.
+        // Resolve permissionsContext: agent DB (authoritative) → body → undefined.
+        // The agent's stored delegationContext is its OWN authority — for A2A
+        // workers this is a SCOPED, on-chain-capped chain (user→FM→worker→relayer).
+        // It MUST take precedence over body.permissionsContext (the root grant the
+        // dashboard sends), otherwise a worker would redeem the uncapped root and
+        // bypass its ERC20TransferAmountEnforcer cap. Body is only a fallback for
+        // agents that have no real stored context yet.
         const resolvedPermCtx =
-          (body.permissionsContext && body.permissionsContext !== "0xdemo" && body.permissionsContext.length > 20)
-            ? body.permissionsContext
-            : (agent.delegationContext && agent.delegationContext !== "0xdemo" && agent.delegationContext.length > 20)
-                ? agent.delegationContext
+          (agent.delegationContext && agent.delegationContext !== "0xdemo" && agent.delegationContext.length > 20)
+            ? agent.delegationContext
+            : (body.permissionsContext && body.permissionsContext !== "0xdemo" && body.permissionsContext.length > 20)
+                ? body.permissionsContext
                 : undefined;
 
         const ctx: ExecutorContext = {
@@ -214,14 +222,28 @@ export async function POST(request: NextRequest) {
         // so the intent is honored deterministically. This is a REAL on-chain call
         // via the relayer — not a simulation.
         const wantsImmediate = /execute\s+immediately|execute\s+now|just\s+execute|supply\s+\$?\d/i.test(agent.goal);
-        if (!executedOnce && wantsImmediate) {
-          // Parse amount + protocol from the goal (fallbacks if absent).
-          const amtMatch = agent.goal.match(/\$?\s*(\d+(?:\.\d+)?)\s*USDC/i);
-          const amount   = amtMatch ? amtMatch[1] : "1";
-          const protoMatch = agent.goal.toLowerCase().match(/\b(morpho|aave|uniswap|aerodrome|lido)\b/);
-          const protocol = protoMatch ? protoMatch[1] : "aave";
+        // A FRESH yield/rebalancer agent (budget granted, nothing deployed yet)
+        // should make its FIRST deposit rather than hold indefinitely — unless
+        // risk came back HIGH. This makes "deploy my capital" the default on run 1,
+        // matching what a yield agent is for. Subsequent runs use normal reasoning.
+        const isYieldType   = !agent.agentType || agent.agentType === "yield" || agent.agentType === "rebalancer";
+        const neverExecuted = (agent.totalExecuted ?? 0) === 0 && (agent.budgetUsedUsdc ?? 0) === 0;
+        const sawHighRisk   = allToolResults.some(r => r.tool === "checkRisk" && /\bhigh\b/i.test(r.result));
+        const shouldFirstDeposit = isYieldType && neverExecuted && !sawHighRisk;
 
-          await emit("plan", { observation: `Goal requires immediate execution — forcing executeDefi(${protocol}, ${amount} USDC).` }, planId, { x: 380, y: canvasY });
+        if (!executedOnce && (wantsImmediate || shouldFirstDeposit)) {
+          // Protocol: first one named in the goal, else Morpho (a safe blue-chip default).
+          const protoMatch = agent.goal.toLowerCase().match(/\b(morpho|aave|uniswap|aerodrome|lido)\b/);
+          const protocol = protoMatch ? protoMatch[1] : "morpho";
+          // Amount: parse from the goal, else the full budget — then leave room
+          // for the relayer fee so fee+work stays UNDER the on-chain cap (else the
+          // ERC20TransferAmountEnforcer would revert). Floor at 0.1 USDC.
+          const budgetNum = Number(agent.budgetUsdc) || 1;
+          const amtMatch  = agent.goal.match(/\$?\s*(\d+(?:\.\d+)?)\s*USDC/i);
+          const parsed    = amtMatch ? Number(amtMatch[1]) : budgetNum;
+          const amount    = Math.max(0.1, Math.min(parsed, budgetNum - 0.2)).toFixed(2);
+
+          await emit("plan", { observation: `Deploying first position — executeDefi(${protocol}, ${amount} USDC) within the ${budgetNum} USDC cap.` }, planId, { x: 380, y: canvasY });
           canvasY += 100;
 
           const forced = await executeTool("executeDefi", {
@@ -334,38 +356,25 @@ export async function POST(request: NextRequest) {
         if (shouldGenerateMedia) {
           send("status", { phase: "media" });
 
-          // TTS — call x402 endpoint, get audio bytes, convert to data URL for Telegram
-          // Bug 6 fix: use CLOVE_INTERNAL_SECRET so verifyPayment() accepts the call.
-          const internalSig = Buffer.from(JSON.stringify({
-            internalSecret: process.env.CLOVE_INTERNAL_SECRET ?? "",
-            payload: { permissionContext: ctx.permissionsContext ?? "0xinternalcall" },
-          })).toString("base64");
+          // Voice + image reports (Venice) — internal endpoints, no x402.
           try {
-            const ttsRes = await fetch(`${baseUrl}/api/x402/tts`, {
+            const ttsRes = await fetch(`${baseUrl}/api/media/tts`, {
               method: "POST",
-              headers: { "Content-Type": "application/json", "PAYMENT-SIGNATURE": internalSig },
+              headers: { "Content-Type": "application/json", ...internalHeaders() },
               body: JSON.stringify({ text: reflection.insight }),
               signal: AbortSignal.timeout(12000),
             });
-            if (ttsRes.ok && ttsRes.headers.get("content-type")?.includes("audio")) {
-              // Count the ACTUAL amount charged (from the service's X-Clove-Cost header),
-              // not a hardcoded guess. We do NOT advertise a voiceUrl here: Telegram
-              // rejects data URLs for sendVoice and there is no public audio host yet,
-              // so claiming a URL would be dishonest. Audio delivery is intentionally
-              // omitted until real hosting exists.
-              const charged = Number.parseFloat(ttsRes.headers.get("X-Clove-Cost") ?? "0");
-              if (Number.isFinite(charged)) x402Total += charged;
-            } else {
+            if (!(ttsRes.ok && ttsRes.headers.get("content-type")?.includes("audio"))) {
               const j = await ttsRes.json().catch(() => ({}));
               if (j.skipped) console.log("[run-stream] TTS skipped:", j.reason);
             }
+            // Audio is generated but not surfaced as a URL (no public audio host yet).
           } catch (e) { console.warn("[run-stream] TTS exception:", e); }
 
-          // IMAGE — call x402 endpoint, get URL (or SVG data URL fallback)
           try {
-            const imgRes = await fetch(`${baseUrl}/api/x402/image`, {
+            const imgRes = await fetch(`${baseUrl}/api/media/image`, {
               method: "POST",
-              headers: { "Content-Type": "application/json", "PAYMENT-SIGNATURE": internalSig },
+              headers: { "Content-Type": "application/json", ...internalHeaders() },
               body: JSON.stringify({
                 prompt:     imagePromptForReflection(reflection, {
                   protocol: extractProtocol(allToolResults),
@@ -383,10 +392,6 @@ export async function POST(request: NextRequest) {
             if (imgRes.ok) {
               const j = await imgRes.json();
               imageUrl = j.imageUrl;
-              // Count the ACTUAL amount charged from the service response, not a
-              // hardcoded guess. Fallback SVGs report costUsdc:0 / paid:false.
-              const charged = Number(j._clove?.costUsdc ?? 0);
-              if (j._clove?.paid && Number.isFinite(charged)) x402Total += charged;
             }
           } catch (e) { console.warn("[run-stream] image exception:", e); }
 
@@ -575,7 +580,24 @@ Once the subgoal is done, output a one-line summary as plain text (no tool call)
       let args: Record<string, unknown> = {};
       try { args = JSON.parse(call.function.arguments) as Record<string, unknown>; } catch { /**/ }
 
-      // Emit tool-call thought BEFORE execution so the canvas shows it "thinking"
+      const isMetaTool = call.function.name === "addThought" || call.function.name === "revisePlan";
+
+      // META-TOOLS (addThought / revisePlan) are pure reasoning — emit ONE clean
+      // observation node, not the generic "Thinking" + "Thinking done" pair that
+      // clutters the canvas. REAL tools (checkYields, executeDefi, …) get the
+      // full tool-call → tool-result pair so the action + tx are visible.
+      if (isMetaTool) {
+        const result = await executeTool(call.function.name, args, ctx);
+        results.push(result);
+        if (call.function.name === "addThought" && typeof args.text === "string" && args.text.trim()) {
+          await emit("plan", { observation: args.text }, parentId, { x: cx, y: cy });
+          cy += 80;
+        }
+        toolResults.push({ role: "tool", tool_call_id: call.id, content: result.result });
+        continue;
+      }
+
+      // Emit tool-call thought BEFORE execution so the canvas shows the action.
       const callId = await emit("tool-call", {
         tool: call.function.name,
         args,
@@ -585,7 +607,7 @@ Once the subgoal is done, output a one-line summary as plain text (no tool call)
       const result = await executeTool(call.function.name, args, ctx);
       results.push(result);
 
-      // Emit tool-result thought
+      // Emit tool-result thought — includes txHash so the canvas shows the on-chain action.
       let parsed: Record<string, unknown> = {};
       try { parsed = JSON.parse(result.result) as Record<string, unknown>; } catch { /**/ }
       await emit("tool-result", {
@@ -594,12 +616,6 @@ Once the subgoal is done, output a one-line summary as plain text (no tool call)
         cost:    result.cost,
         txHash:  result.txHash,
       }, callId, { x: cx + 220, y: cy - 90 });
-
-      // Special handling for addThought — emit a goal-style observation
-      if (call.function.name === "addThought" && result.isMeta) {
-        await emit("plan", { observation: args.text }, parentId, { x: cx, y: cy });
-        cy += 80;
-      }
 
       toolResults.push({ role: "tool", tool_call_id: call.id, content: result.result });
     }

@@ -3,6 +3,7 @@ import { getDb } from "@/lib/db/mongodb";
 import { getRecentThoughts } from "@/lib/agent/thoughts";
 import { imagePromptForReflection } from "@/lib/agent/planner";
 import { getInternalSecretOptional } from "@/lib/config/env";
+import { internalHeaders } from "@/lib/auth/internal";
 import type { Agent } from "@/lib/agent/agents";
 
 /**
@@ -37,12 +38,8 @@ export async function GET(request: NextRequest) {
   const baseUrl = request.nextUrl.origin;
   const results: Array<{ agentId: string; ok: boolean; reason?: string }> = [];
 
-  // Real internal-secret signature so the fail-closed x402 verifier accepts these
-  // server-to-server media calls. If the secret isn't configured, media is skipped.
-  const internalSecret = getInternalSecretOptional();
-  const internalSig = internalSecret
-    ? Buffer.from(JSON.stringify({ internalSecret, payload: {} })).toString("base64")
-    : null;
+  // Internal media calls require the shared secret. If unset, media is skipped.
+  const hasInternalSecret = !!getInternalSecretOptional();
 
   for (const agent of agents) {
     try {
@@ -62,10 +59,10 @@ export async function GET(request: NextRequest) {
       let imageUrl: string | undefined;
 
       try {
-        if (!internalSig) throw new Error("CLOVE_INTERNAL_SECRET not set — skipping media");
-        const imgRes = await fetch(`${baseUrl}/api/x402/image`, {
+        if (!hasInternalSecret) throw new Error("CLOVE_INTERNAL_SECRET not set — skipping media");
+        const imgRes = await fetch(`${baseUrl}/api/media/image`, {
           method: "POST",
-          headers: { "Content-Type": "application/json", "PAYMENT-SIGNATURE": internalSig },
+          headers: { "Content-Type": "application/json", ...internalHeaders() },
           body: JSON.stringify({
             prompt: imagePromptForReflection(
               { insight: insightText, tags: [], didSucceed: true },

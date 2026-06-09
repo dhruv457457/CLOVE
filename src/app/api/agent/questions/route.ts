@@ -101,12 +101,12 @@ Return ONLY valid JSON — no prose:
       "id": "notify",
       "label": "How should the agent report back?",
       "type": "multi",
-      "options": ["Telegram message", "Voice note (x402 TTS)", "Strategy image (x402 art)", "Silent — just execute"]
+      "options": ["Telegram message", "Voice note (Venice TTS)", "Strategy image (Venice art)", "Silent — just execute"]
     },
     {
       "id": "orchestration",
       "label": "Agent architecture?",
-      "hint": "Multi-agent creates a Scout + Risk Monitor + Executor team",
+      "hint": "Multi-agent: a Fund Manager splits the budget into specialized workers, each with its own on-chain-capped budget",
       "type": "single",
       "options": ["Single agent (simple)", "Multi-agent team — auto-wired orchestration", "Decide for me"]
     }
@@ -180,11 +180,11 @@ function defaultQuestions(): Question[] {
     },
     {
       id: "notify", label: "How should the agent report back?", type: "multi",
-      options: ["Telegram message", "Voice note (x402 TTS)", "Strategy image", "Silent"],
+      options: ["Telegram message", "Voice note (Venice TTS)", "Strategy image", "Silent"],
     },
     {
       id: "orchestration", label: "Agent architecture?",
-      hint: "Multi-agent creates Scout + Risk Monitor + Executor team, auto-wired",
+      hint: "Multi-agent: a Fund Manager splits the budget into specialized workers, each on-chain-capped",
       type: "single",
       options: ["Single agent", "Multi-agent team — auto-wired", "Decide for me"],
     },
