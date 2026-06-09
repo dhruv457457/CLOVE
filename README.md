@@ -2,477 +2,247 @@
 
 # CLOVE
 
-### Autonomous capital, quietly.
+### Autonomous capital, with budgets it *physically* can't break.
 
-**The autonomous DeFi agent OS — describe a strategy in plain English, grant one ERC-7715 budget, and an AI agent researches, decides, and executes onchain. Fully non-custodial.**
+**Grant one capped USDC budget. A Fund Manager AI splits it across specialized agents — each with its own key, its own smart account, and an on-chain budget it cannot exceed. They research, decide, and execute on Base + Polygon while you sleep. Fully non-custodial. Revocable in one click.**
 
-[![Built on Base](https://img.shields.io/badge/Built%20on-Base%20mainnet-0052FF?style=flat-square)](https://base.org)
+[![Built on Base + Polygon](https://img.shields.io/badge/Built%20on-Base%20%2B%20Polygon-0052FF?style=flat-square)](https://base.org)
 [![ERC-7715](https://img.shields.io/badge/Permissions-ERC--7715-C8FF3D?style=flat-square)](https://eips.ethereum.org/EIPS/eip-7715)
-[![x402](https://img.shields.io/badge/Payments-x402-8B6BFF?style=flat-square)](https://x402.org)
+[![ERC-7710](https://img.shields.io/badge/Delegation-ERC--7710-C8FF3D?style=flat-square)](https://eips.ethereum.org/EIPS/eip-7710)
+[![1Shot Relayer](https://img.shields.io/badge/Gas-1Shot%20Relayer%20(USDC)-9b87f5?style=flat-square)](https://1shotapi.com)
 [![Venice AI](https://img.shields.io/badge/AI-Venice-FF5A1F?style=flat-square)](https://venice.ai)
+
+🌐 **Live demo:** _[your-deployed-url]_ · 🎥 **Demo video:** _[link]_ · 🐦 **[@clove_fi_ai](https://x.com/clove_fi_ai)**
+
+_Built for the **MetaMask Smart Accounts Kit × 1Shot API × Venice AI** Dev Cook Off._
 
 </div>
 
 ---
 
+## 🏆 The proof — caps enforced on-chain, not in our code
+
+Everyone claims "safe AI agents." We made it **provable on Base mainnet**.
+
+A worker agent was capped at **0.05 USDC**. We told it to move **1.0 USDC** through the 1Shot relayer. The transaction **reverted at the EVM level**:
+
+```
+Error(ERC20TransferAmountEnforcer:allowance-exceeded)
+```
+
+The cap isn't a database flag or an `if` statement we could forget — it's a **MetaMask caveat enforcer** baked into the delegation. Even if our backend were fully compromised, the worker still couldn't overspend.
+
+**Verify it yourself on-chain:**
+
+- 🔗 **CloveAutoDeposit contract** — every real ERC-7710 redemption + protocol deposit lands here:
+  [`0xb7aD6bcCD73db1a21A6144Ecbc9Cc225Dd6AF1dC`](https://basescan.org/address/0xb7aD6bcCD73db1a21A6144Ecbc9Cc225Dd6AF1dC)
+- 🔗 **Fund Manager** (delegator, holds the user grant):
+  [`0xbF690def68D68E1cF7b643fEEc8E85789dF0C2E1`](https://basescan.org/address/0xbF690def68D68E1cF7b643fEEc8E85789dF0C2E1)
+- ▶️ Reproduce in 1 click: open **`/dashboard/proof`** → "Try to overspend" → watch it revert.
+
+> A real `Redeem Delegation` moved **1.8 USDC** into **Moonwell mwUSDC**, gas paid in USDC via the relayer — no ETH anywhere.
+
+---
+
 ## The problem
 
-DeFi forces a brutal trade-off:
+Autonomous DeFi agents force a brutal trade-off:
 
-- **Manual** — you spend hours every week comparing yields, evaluating risk, and clicking through MetaMask. APY changes overnight. You miss the rebalance. You hold through a hack.
-- **Custodial bots** — you hand your private keys (or a permissioned hot wallet) to a third party. They take fees, get hacked, or quietly drift your strategy.
-- **DAOs / vaults** — you give up control of how your capital is deployed in exchange for "set and forget." You can't say "rebalance to the highest APY but never touch Aerodrome."
+- **Custodial bots** — you hand over keys (or a permissioned hot wallet). They take fees, get hacked, or drift your strategy.
+- **"Trust me" agents** — the budget is enforced by the app's own code. One bug or breach and your wallet is drained.
+- **DAOs / vaults** — set-and-forget, but you give up all control of *how* capital is deployed.
 
-**CLOVE is none of these.** It's a non-custodial agent runtime where:
-
-1. You describe what you want in English.
-2. You grant a **recurring USDC budget** via ERC-7715 — capped, time-limited, revocable in one tx.
-3. An AI agent runs on a schedule. It pays for live market intel. It reasons against memory of every prior run. It executes through your delegation. It tells you what it did.
-
-You never hand over keys. You never run a bot. The agent thinks before it spends.
+**CLOVE is none of these.** Your funds never leave your wallet until a delegation redeems them straight into a protocol. Every agent's spending limit is enforced **by the chain**, not by us.
 
 ---
 
 ## How it works
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                                                                     │
-│  YOU                                                                │
-│   │                                                                 │
-│   │ "Watch USDC yields, deposit into best safe vault > 8%,         │
-│   │  hold otherwise, alert me on Telegram. 10 USDC / 30 days."     │
-│   ▼                                                                 │
-│  ┌─────────────────────────┐                                       │
-│  │  VENICE AI COMPILER     │  Plain English → Workflow JSON         │
-│  └────────────┬────────────┘                                       │
-│               │                                                     │
-│               ▼                                                     │
-│  ┌─────────────────────────┐  ┌──────────────────────────────────┐ │
-│  │  REACT FLOW CANVAS      │  │  ERC-7715 PERMISSION             │ │
-│  │  Visual node graph      │  │  10 USDC / 30 days → CLOVE agent │ │
-│  │  Editable per node      │  │  (signed once in MetaMask)       │ │
-│  └────────────┬────────────┘  └────────────┬─────────────────────┘ │
-│               │                            │                       │
-│               └────────┬───────────────────┘                       │
-│                        ▼                                           │
-│  ┌────────────────────────────────────────────────────────────┐    │
-│  │  VENICE REACT AGENT LOOP  (runs on Vercel cron)            │    │
-│  │                                                            │    │
-│  │   checkYields ──► checkRisk ──► executeDefi ──► notifyUser │    │
-│  │       │              │              │              │       │    │
-│  │       │              │              │              └─► Telegram │
-│  │       │              │              └─► 1Shot executeAsDelegator │
-│  │       │              └─► Venice analyses news + APY       │    │
-│  │       └─► /api/intelligence (x402: pay 0.01 USDC,         │    │
-│  │            get yields + market intel from Tavily/Exa/Venice)│    │
-│  │                                                            │    │
-│  │   ALL decisions read agent memory from MongoDB:            │    │
-│  │   - Current position (which protocol, when entered)         │    │
-│  │   - Last 5 runs (rebalance? hold? success?)                │    │
-│  │   - 7-day APY history (real signal vs noise)                │    │
-│  └────────────────────────────────────────────────────────────┘    │
-│                        │                                           │
-│                        ▼                                           │
-│  ┌────────────────────────────────────────────────────────────┐    │
-│  │  ON-CHAIN EXECUTION (Base mainnet)                         │    │
-│  │  1Shot redeems your ERC-7715 delegation → UserOp →          │    │
-│  │  DelegationManager.redeemDelegation() → Morpho/Sky/Uniswap │    │
-│  │  Returns txHash. Gasless on your side.                     │    │
-│  └────────────────────────────────────────────────────────────┘    │
-│                                                                    │
-└─────────────────────────────────────────────────────────────────────┘
+  YOU
+   │  "Rebalance my USDC across Morpho and Aave for the best risk-adjusted
+   │   yield. Conservative. 2 USDC. Daily. Telegram me. Multi-agent."
+   ▼
+  ┌──────────────────────────────────────────────────────────────────┐
+  │  ONE ERC-7715 GRANT  →  FUND MANAGER  (capped, revocable)          │
+  └───────────────┬──────────────────────────────────────────────────┘
+                  │  redelegates scoped, ON-CHAIN-CAPPED slices
+        ┌─────────┼───────────────┬───────────────┬──────────────────┐
+        ▼         ▼               ▼               ▼                  ▼
+   Morpho Scout  Aave Scout   Convergence     Risk Monitor      Executor
+   (read-only)   (read-only)  Analyzer        (gates risk)      (spends, capped)
+        └─────────┴──── shared team memory ────┴───────────────────┘
+                                                       │
+                                                       ▼
+                              1Shot Public Relayer  (gas in USDC, no ETH)
+                                                       │
+                                          ┌────────────┴────────────┐
+                                          ▼                         ▼
+                                    Base mainnet              Polygon (Polymarket)
+                            Morpho · Aave · Uniswap         prediction-market bets
+                            · Aerodrome · Lido
 ```
+
+- **Derived keys (option C):** every agent gets its own key — `keccak256(rootKey ‖ agentId)` — so it's a genuinely separate signer + smart account. One secret is ever stored.
+- **Real ERC-7710 redemption:** the worker's chain `user → Fund Manager → worker → relayer` is redeemed by the permissionless 1Shot relayer. Two caveat enforcers ride along: `AllowedTargetsEnforcer` (where it can call) + `ERC20TransferAmountEnforcer` (how much it can spend).
+- **Venice reasons, then acts:** plan → scout live yields → assess risk → check your uploaded playbook (RAG) → execute → reflect.
+
+---
+
+## 🎯 Why CLOVE wins each track
+
+| Track | How CLOVE wins |
+|---|---|
+| **Best A2A coordination** | A Fund Manager redelegates **real ERC-7710 scoped chains** to worker agents — each with its own key + on-chain-enforced cap. **Overspend reverts on-chain (provable).** Agents coordinate via shared team memory (scout findings feed the analyzer feeds the executor). |
+| **Best Agent** | A from-scratch Venice **ReAct loop** (no LangChain) that plans, scouts live yields, reasons against persistent memory **+ the user's uploaded playbook (RAG)**, executes real deposits, and reflects. |
+| **Best Venice AI** | **Four** Venice surfaces: reasoning (`llama-3.3-70b`), embeddings (RAG knowledge base), TTS voice reports, and image strategy cards. |
+| **Best 1Shot Relayer** | **All** execution flows through the **permissionless Public Relayer** — gas paid in USDC, zero ETH, **multi-chain** (Base + Polygon). |
+| **Best Social Media** | [@clove_fi_ai](https://x.com/clove_fi_ai) |
 
 ---
 
 ## Features
 
-### 🧠 Plain-English strategy compiler
+### 🏦 Fund Manager → capped worker agents (real A2A)
+Describe a strategy and choose "multi-agent." A **Fund Manager** node holds your single grant and splits it into specialized workers — yield scouts, a convergence analyzer, a risk monitor, an executor — each with its **own derived smart account and on-chain budget**.
 
-Type a sentence. Venice AI compiles it into a visual workflow: trigger → budget → intel → reasoning → execution → notification. Each node is editable in the right panel.
+### 🔐 On-chain-enforced budgets (the headline)
+Every worker's delegation carries `AllowedTargetsEnforcer` + `ERC20TransferAmountEnforcer`. It can only call whitelisted protocol contracts, and only up to its cap. **Try to exceed it → the chain reverts.** Proven, not promised.
 
-```
-"Hourly check, 25 USDC budget, protect from risk, rebalance to best yield, notify Telegram"
-```
+### 📚 Bring your own playbook (RAG)
+Upload your rules ("never touch memecoins · only blue-chip protocols · max 30% per position"). CLOVE embeds them with Venice and injects the most relevant ones into the agent's reasoning before every decision.
 
-### 🔐 Non-custodial via ERC-7715
+### 🤖 Venice ReAct agent (hand-built)
+A real plan → act → reflect loop on Venice's OpenAI-compatible API. Watch it think on a live canvas — compact nodes that expand on click, with protocol logos and the real tx + token received.
 
-CLOVE never holds your private key. You grant a **recurring USDC allowance** to CLOVE's smart-account wallet (managed by 1Shot). The permission:
+### 🔄 Real deposits + one-click revocation
+Genuine Morpho (Moonwell) / Aave v3 deposits via the `CloveAutoDeposit` contract. Revoke any delegation on-chain from the UI — `DelegationManager.disableDelegation`.
 
-- Is **capped** (e.g. 10 USDC every 30 days — never more)
-- Is **time-limited** (expires automatically)
-- Is **revocable on-chain in one transaction** (DelegationManager.disableDelegation)
-- Survives nothing — no private key import, no seed phrase, no allowance set on a sketchy contract
+### 🐋 Dune-powered copy-trade
+Discover the smartest money on Base via Dune Analytics (whale ranking + convergence), then mirror trades when multiple whales agree.
 
-### 💸 x402 paid intelligence
+### 🎲 Polymarket prediction bets (multi-chain)
+The Polymarket agent runs on **Polygon** — a Polygon ERC-7715 grant + the Polygon 1Shot relayer + real CLOB orders via `@polymarket/clob-client`.
 
-The agent doesn't get free data. Every time it wakes up, it pays **0.01 USDC via x402** to `/api/intelligence`, which aggregates:
+### 🧠 Persistent memory · 📅 scheduling · 💬 Telegram reports
 
-- **Venice AI** — risk-adjusted yield reasoning
-- **Tavily** — live DeFi news and exploit alerts
-- **Exa** — semantic search across protocol docs
+---
 
-This is real demand-driven payment for AI inference — the same pattern that makes the open agentic economy work.
+## ✅ What's real vs. what we cut (honesty)
 
-### 🤖 Venice ReAct agent (not LangChain, not Vercel AI SDK)
+We'd rather ship less and have it be true.
 
-Custom OpenAI function-calling loop using Venice's `llama-3.3-70b` model. Five tools:
+**Real, on-chain (Base mainnet / Polygon):**
+- ERC-7715 grant → ERC-7710 redemption via the 1Shot Public Relayer
+- Per-agent on-chain-enforced caps (overspend reverts — verifiable above)
+- Morpho (Moonwell) + Aave v3 deposits; on-chain revocation
+- Polymarket CLOB orders on Polygon
+- Venice reasoning, embeddings/RAG, TTS, image
 
-| Tool          | Purpose                                                         |
-|---------------|-----------------------------------------------------------------|
-| `checkYields` | x402-paid call to intelligence API. Returns APY map + news     |
-| `checkRisk`   | Keyword + sentiment scan for exploits, pauses, depegs            |
-| `executeDefi` | Calls `/api/execute/defi` → 1Shot → on-chain tx                  |
-| `rebalance`   | Withdraw from old protocol + deposit into new (atomic)           |
-| `notifyUser`  | Sends Telegram message via Bot API                               |
-
-Venice decides which tools to call and in what order based on memory + market data.
-
-### 👥 Multi-agent teams (auto-wired orchestration)
-
-Pick **Multi-agent team** and CLOVE fans a prompt out into a coordinated swarm:
-
-```
-[Scout × N]  →  Convergence Analyzer  →  Risk Monitor  →  Executor
-```
-
-The "scout dimension" generalizes by agent type:
-
-- **yield / rebalancer** → one scout per **protocol** (Morpho, Aave, Aerodrome, Uniswap, Lido)
-- **copy-trader** → one scout per **whale wallet**
-
-Scouts are read-only (budget `$0`); the Analyzer holds the root ERC-7715 permission
-and sub-delegates down the chain; only the Executor transacts. Run the whole team
-in one click with **▶ Run Team** — it streams the live Scout → Risk → Executor
-pipeline with the on-chain tx + Basescan link.
-
-### 🐋 Copy-trader: track or *discover* alpha
-
-Copy-trader teams have two auto-selected modes:
-
-- **Manual** — paste `0x…` addresses → one scout tracks each via `checkWhaleTrades`
-- **Discovery** — no addresses → a **Whale Discovery Scout** finds them itself via
-  `discoverWhales`, ranking Base wallets by **realized PnL** (Dune) or size/activity
-  (Basescan fallback). The Convergence Detector then fires when 2+ alpha wallets buy
-  the same token. See **[docs/whale-discovery.md](docs/whale-discovery.md)**.
-
-### 🗄️ Persistent memory (MongoDB)
-
-Every run writes to MongoDB Atlas (`clove` DB). The agent reads its full history before deciding:
-
-- **`agent_runs`** — every execution: protocol, action, APY, txHash, cost, Venice reasoning
-- **`agent_positions`** — current deployment (one per wallet)
-- **`apy_snapshots`** — rolling APY data for trend detection
-- **`workflows`** — saved workflow graphs (for cron re-execution)
-- **`schedules`** — user-configured triggers
-
-Result: the agent doesn't redo work. If you're already in Morpho at 9.31% and that's still the best APY, it **HOLDs** — no needless gas, no needless x402 fees.
-
-### 🎨 Visual workflow canvas
-
-Built on ReactFlow. Each strategy is a node graph:
-
-- **Drag** to reposition nodes
-- **Click** to edit any node's config in the right panel
-- **Lime accent** highlights the currently executing node during a run
-- **Dashed flowing edges** show data movement
-- **Live APY** displayed inside relevant nodes
-
-### 📅 Scheduling
-
-Set a workflow to run **every 5 min / 15 min / 30 min / hourly / 6h / daily / weekly** or paste a custom cron. Schedules are stored in MongoDB; Vercel cron polls `/api/agent/cron` hourly and runs every enabled wallet's saved workflow.
-
-### 💬 Telegram notifications
-
-Every action ends with a Telegram message showing the txHash, protocol, APY, and Venice's reasoning. (Bot: [@clove_erc7715bot](https://t.me/clove_erc7715bot))
+**Cut:**
+- ❌ **x402** — our integration only *simulated* settlement (no USDC actually moved). Rather than fake it, we removed it entirely. Venice intel/TTS/image are now free internal calls.
 
 ---
 
 ## Tech stack
 
-| Layer            | Tech                                                                  |
-|------------------|-----------------------------------------------------------------------|
-| **Frontend**     | Next.js 16 (Turbopack), React 18, ReactFlow, TailwindCSS              |
-| **Design**       | Geist + Instrument Serif italic, paper #F4F1EA + ink #0B0C09 + lime #C8FF3D |
-| **Wallet**       | MetaMask v12+ (ERC-7715), `@metamask/smart-accounts-kit`              |
-| **Server wallet**| 1Shot API (managed smart account, gas sponsorship, delegation redemption) |
-| **Payments**     | x402 protocol — HTTP 402 + PAYMENT-SIGNATURE                         |
-| **AI**           | Venice AI (OpenAI-compatible, privacy-first) — `llama-3.3-70b` for the agent, `qwen3-5-9b` for compilation |
-| **Intelligence** | Tavily (news), Exa (semantic search), fal.ai (visuals) — optional    |
-| **Persistence**  | MongoDB Atlas (`clove` DB)                                            |
-| **Chain**        | Base mainnet (chainId 8453)                                           |
-| **Notifications**| Telegram Bot API                                                      |
-| **Scheduling**   | Vercel cron → `/api/agent/cron`                                       |
+| Layer | Choice |
+|---|---|
+| Framework | Next.js 16 (App Router), TypeScript, Tailwind |
+| Smart accounts | `@metamask/smart-accounts-kit` (ERC-7715/7710, caveat enforcers, `Implementation.Hybrid`) |
+| Execution | 1Shot **Public Relayer** (permissionless, gas-in-USDC) — Base + Polygon |
+| AI | Venice AI (OpenAI-compatible): `llama-3.3-70b` + embeddings + `tts-kokoro` + image |
+| Onchain | `viem` 2.x · Base mainnet (8453) + Polygon (137) |
+| Prediction markets | `@polymarket/clob-client` |
+| Analytics | Dune Analytics (whale discovery) |
+| Canvas | `@xyflow/react` (compact-by-default nodes, click to expand) |
+| Store | MongoDB Atlas |
 
 ---
 
-## Supported protocols (Base mainnet)
+## Supported protocols
 
-| Protocol  | Action            | Contract                                                                                          |
-|-----------|-------------------|---------------------------------------------------------------------------------------------------|
-| **Morpho** (Moonwell USDC vault) | Lend / supply USDC | [`0xc1256Ae5...A2Ca`](https://basescan.org/address/0xc1256Ae5FF1cf2719D4937adb3bbCCab2E00A2Ca) |
-| **Sky** (sUSDS)   | Save / deposit USDC | [`0x5875eEE1...467a`](https://basescan.org/address/0x5875eEE11Cf8398102FdAd704C9E96607675467a) |
-| **Lido** (wstETH) | Wrap stETH → wstETH | [`0xc1CBa3fC...e452`](https://basescan.org/address/0xc1CBa3fCea344f92D9239c08C0568f6F2F0ee452) |
-| **Uniswap V3**    | Swap USDC ↔ WETH    | [`0x2626664c...e481`](https://basescan.org/address/0x2626664c2603336E57B271c5C0b26F421741e481) |
-| **Aerodrome**     | Swap / LP            | [`0xcF77a3Ba...4E43`](https://basescan.org/address/0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43) |
+**Base (8453):** Morpho (Moonwell USDC) · Aave v3 · Uniswap v3 · Aerodrome · Lido (wstETH)
+**Polygon (137):** Polymarket (CLOB prediction markets)
 
 ---
 
-## Demo flow
+## 60-second demo
 
-1. Open [localhost:3000](http://localhost:3000) → landing page
-2. Click **Launch agent** → dashboard
-3. In the **Ask clove** sidebar, type: `Hourly check, 0.1 USDC budget, deposit into best Morpho vault, notify Telegram`
-4. Workflow appears on canvas: `Trigger → Budget → Venice (x402) → Compare → Execute → Notify`
-5. **Right panel → Permission tab** → Click **Grant ERC-7715 Permission** → MetaMask popup → Confirm
-6. **Schedule tab** → Set "Every hour" → Enable → Save
-7. Hit the lime **Run** button (top-right) — or wait for cron
-8. Watch the canvas: each node lights lime as Venice executes it
-9. **Bottom log strip** streams each tool call in real time
-10. ✅ Telegram message arrives with the on-chain txHash
-11. Click the txHash → opens [basescan.org](https://basescan.org) showing your real Morpho deposit
-
-Run again immediately — Venice reads memory, sees you're already in Morpho at the best APY, and says **HOLD**. No tx, no fees. That's the loop working.
+1. **Connect** MetaMask (Base) and have a little USDC in your wallet.
+2. **New workflow** → *"Rebalance my USDC across Morpho and Aave for the best risk-adjusted yield, conservative, 2 USDC, daily, multi-agent."*
+3. Sign the **Fund Manager grant** → toast: *"Team live · N workers on-chain-capped ✓"*. See the **Fund Manager → scouts → analyzer → risk → executor** canvas.
+4. **Run agent** → it scans yields, assesses risk, and makes a **real deposit** into Morpho (gas in USDC). The execute node shows the **tx + token received** (e.g. `→ mwUSDC`).
+5. **`/dashboard/proof`** → "Try to overspend" → `ERC20TransferAmountEnforcer:allowance-exceeded`. 🎯
 
 ---
 
-## Quick start (local development)
+## Quick start
 
 ### Prerequisites
-
-- Node.js 20+
-- npm or pnpm
-- A MetaMask wallet on **Base mainnet** with ≥ 0.1 USDC
-- API keys (see Environment below)
+- Node 20+, a MongoDB Atlas URI, a Venice AI key, a MetaMask wallet, a little USDC on Base.
 
 ### Install & run
-
 ```bash
-git clone https://github.com/your-org/CLOVE.git
-cd CLOVE
 npm install
-cp .env.example .env.local   # then fill in keys
-npm run dev
-# → http://localhost:3000
+npm run dev          # → http://localhost:3000
 ```
 
-### Environment variables
-
-Create `.env.local` from `.env.example` and fill these in:
-
+### Environment (`.env.local`)
 ```bash
-# ── 1Shot API (managed server wallet on Base mainnet) ─────
-ONESHOT_API_KEY=         # dashboard.1shotapi.com → API Keys
-ONESHOT_API_SECRET=
-ONESHOT_BUSINESS_ID=
-ONESHOT_WALLET_ID=       # the wallet on chainId 8453
-NEXT_PUBLIC_CLOVE_SESSION_ADDRESS=   # public — wallet address shown to users
+# ── AI ────────────────────────────────────────────────
+VENICE_API_KEY=...
 
-# ── Contract Method UUIDs (from 1Shot dashboard) ──────────
-# See ONESHOT_SETUP.md for import instructions
-ONESHOT_METHOD_USDC_APPROVE=
-ONESHOT_METHOD_MORPHO_VAULT_DEPOSIT=
-ONESHOT_METHOD_SKY_DEPOSIT=
-ONESHOT_METHOD_LIDO_WRAP=
-ONESHOT_METHOD_UNISWAP_SWAP_EXACT_INPUT=
-ONESHOT_METHOD_AERODROME_SWAP_EXACT_TOKENS=
+# ── CLOVE session (root key for the Fund Manager + derived agent keys) ──
+CLOVE_SESSION_KEY=0x...                       # session EOA owns the Fund Manager
+NEXT_PUBLIC_CLOVE_SESSION_ADDRESS=0x26a5...   # 1Shot relayer target (Base)
+CLOVE_INTERNAL_SECRET=...                     # server-to-server auth (replaced x402)
+CLOVE_AUTO_DEPOSIT=0xb7aD6bcCD73db1a21A6144Ecbc9Cc225Dd6AF1dC
 
-# ── Venice AI (OpenAI-compatible) ─────────────────────────
-VENICE_API_KEY=
-
-# ── MongoDB Atlas ─────────────────────────────────────────
-MONGODB_URI=mongodb+srv://...   # free cluster → DB name hardcoded as "clove"
-
-# ── Telegram ──────────────────────────────────────────────
-TELEGRAM_BOT_TOKEN=
-TELEGRAM_CHAT_ID=
-
-# ── Network ───────────────────────────────────────────────
+# ── Chains ────────────────────────────────────────────
 BASE_RPC=https://mainnet.base.org
+POLYGON_RPC=https://polygon-rpc.com
 
-# ── Whale discovery (copy-trader teams) — see docs/whale-discovery.md ──
-DUNE_API_KEY=                # dune.com → Settings → API (Base smart-money data)
-DUNE_WHALE_QUERY_ID=         # ranking query: top Base wallets
-DUNE_CONVERGENCE_QUERY_ID=   # signal query: tokens 2+ whales bought
-BASESCAN_API_KEY=            # optional paid fallback (Etherscan free ≠ Base)
+# ── Store / notify ────────────────────────────────────
+MONGODB_URI=mongodb+srv://...
+TELEGRAM_BOT_TOKEN=...
+TELEGRAM_CHAT_ID=...
 
-# ── x402 fee recipient ────────────────────────────────────
-CLOVE_PAY_TO_ADDRESS=    # wallet that receives intelligence API fees
-
-# ── Vercel cron auth ──────────────────────────────────────
-CRON_SECRET=
-
-# ── Optional intelligence sources (graceful skip if missing) ──
-TAVILY_API_KEY=
-FAL_API_KEY=
-EXA_API_KEY=
-```
-
-### Commands
-
-```bash
-npm run dev      # Start dev server (Turbopack, localhost:3000)
-npm run build    # Production build
-npm run lint     # ESLint
-npx tsc --noEmit # Type-check (run this after every change)
+# ── Optional ──────────────────────────────────────────
+DUNE_API_KEY=...                              # copy-trade whale discovery
+POLYMARKET_PK=0x...                           # Polymarket CLOB trader key (defaults to CLOVE_SESSION_KEY)
+POLYMARKET_API_KEY=...  POLYMARKET_API_SECRET=...  POLYMARKET_PASSPHRASE=...
+QUICKNODE_ENDPOINT=...                         # ERC-8004 agent registration
+CRON_SECRET=...                                # Vercel cron auth
 ```
 
 ---
 
-## Project structure
+## How the real A2A delegation works (the crown jewel)
 
-```
-src/
-├── app/
-│   ├── page.tsx                  # Landing (paper / editorial design)
-│   ├── dashboard/page.tsx        # Main workflow builder (ink / lime)
-│   ├── marketplace/page.tsx      # Strategy marketplace (placeholder)
-│   ├── globals.css               # Design tokens + ReactFlow overrides
-│   ├── layout.tsx                # Fonts (Geist + Instrument Serif)
-│   └── api/
-│       ├── agent/
-│       │   ├── compile/route.ts        # Venice AI compiler → workflow JSON
-│       │   ├── run-ai/route.ts         # Venice ReAct agent execution
-│       │   ├── cron/route.ts           # Vercel cron entrypoint
-│       │   ├── schedule/route.ts       # Save/load schedules
-│       │   └── memory/
-│       │       ├── prompt/route.ts     # Memory string for Venice injection
-│       │       └── run/route.ts        # Save a run result
-│       ├── intelligence/route.ts       # x402-gated yield + news endpoint
-│       ├── x402/
-│       │   ├── pay/route.ts            # x402 payment with delegation redelegation
-│       │   └── store-delegation/route.ts
-│       ├── execute/defi/route.ts       # Encode + submit DeFi calls via 1Shot
-│       ├── notify/telegram/route.ts    # Telegram Bot API
-│       └── session/address/route.ts
-├── components/
-│   ├── BlueprintCanvas.tsx       # ReactFlow workflow canvas
-│   ├── EmulatorPanel.tsx         # Grant / Revoke ERC-7715 (right panel)
-│   ├── ProtocolSidebar.tsx       # Browseable protocol list
-│   ├── ScheduleManager.tsx       # Cron / interval picker
-│   ├── RunsHistory.tsx           # Past agent runs
-│   └── WorkflowCodeViewer.tsx    # Live TypeScript code preview
-├── lib/
-│   ├── agent/
-│   │   ├── clove-agent.ts        # Venice ReAct loop (OpenAI function calling)
-│   │   └── memory.ts             # MongoDB CRUD + buildMemoryPrompt()
-│   ├── aiCompiler.ts             # Local regex-based workflow compiler (fallback)
-│   ├── db/mongodb.ts             # Singleton MongoDB client
-│   ├── oneshot/
-│   │   ├── client.ts             # 1Shot SDK init
-│   │   └── agentWallet.ts        # Wallet lookup + delegation helpers
-│   ├── venice/
-│   │   ├── client.ts             # Venice OpenAI client
-│   │   └── analyst.ts            # Yield analysis prompts
-│   ├── tavily/client.ts          # Tavily news/yield search
-│   ├── exa/client.ts             # Exa semantic search
-│   ├── protocols/
-│   │   ├── addresses.ts          # All Base mainnet contracts
-│   │   ├── actions.ts            # Protocol metadata + UI tokens
-│   │   └── logos.ts              # Protocol logo URLs
-│   └── web3/
-│       ├── config.ts             # Chain + USDC
-│       ├── permissions.ts        # ERC-7715 grant / revoke
-│       ├── metamaskStore.ts      # MetaMask state singleton
-│       └── serverSession.ts      # Server-side smart account
-└── ...
-```
+The hard part — and what makes the overspend proof real — is the delegation chain. Three things had to be exactly right (we learned each the hard way):
 
----
+1. **EOA delegators.** Each hop is signed with a raw key, so the `delegator` address must be that key's **EOA** — a counterfactual smart-account address there throws `InvalidEOASignature()`.
+2. **Sanctioned grant path.** Modern MetaMask blocks raw `signDelegation` for its own accounts, so the user→Fund Manager grant goes through ERC-7715 `requestExecutionPermissions` (Advanced Permissions).
+3. **Tightly-packed caveat terms.** Enforcer terms are packed bytes (20-byte addresses concatenated), not ABI-encoded — otherwise `AllowedTargetsEnforcer:invalid-terms-length`.
 
-## API reference
-
-| Route | Method | Purpose |
-|-------|--------|---------|
-| `/api/agent/compile`        | POST | Venice compiler → workflow JSON; saves to MongoDB if `walletAddress` provided |
-| `/api/agent/run-ai`         | POST | Venice ReAct agent execution; saves run to MongoDB |
-| `/api/agent/cron`           | GET  | Vercel cron — loads all enabled schedules, runs each |
-| `/api/agent/schedule`       | POST/GET | Save/load schedule config |
-| `/api/agent/memory/prompt`  | GET `?wallet=` | Full memory string for Venice injection |
-| `/api/agent/memory/run`     | POST | Save a run result |
-| `/api/intelligence`         | GET  | Returns 402 without `PAYMENT-SIGNATURE`; Venice yield data when paid |
-| `/api/x402/pay`             | POST | Pay for an x402 endpoint using ERC-7715 delegation via 1Shot |
-| `/api/x402/store-delegation`| POST | Store ERC-7715 context in 1Shot |
-| `/api/execute/defi`         | POST | Encode protocol calldata; submit via 1Shot `executeAsDelegator` |
-| `/api/notify/telegram`      | POST | Send Telegram message via Bot API |
-| `/api/session/address`      | GET  | Returns the 1Shot wallet address |
-
----
-
-## Design system
-
-CLOVE rejects the standard "dark-mode DeFi #1,247" aesthetic. The design is **quiet luxury**:
-
-- **Paper `#F4F1EA`** on the marketing site — most DeFi is dark, we flip it
-- **Ink `#0B0C09`** on the app — calm, focused, no terminal cosplay
-- **Acid lime `#C8FF3D`** — one electric jolt per viewport, used like a highlighter
-- **Geist** (sans, multiple weights) + **Instrument Serif italic** (editorial tension on one keyword per heading)
-- All transitions use the brand easing: `cubic-bezier(.2, .8, .2, 1)`
-
-Motion-rich landing page: H1 word-by-word reveal, typewriter prompt, cursor-tracked bloom, rotating active node in hero canvas, agent scrollytelling orb with 5 states (rest → scout → reason → execute → report), 3D-tilted dashboard preview with flowing edges, count-up metrics, infinite protocol marquee.
-
-See `src/app/page.tsx` for the implementation.
-
----
-
-## What CLOVE is **not**
-
-- ❌ **Not a custodial bot** — CLOVE never holds your keys. ERC-7715 is the only path in, revocable in one tx.
-- ❌ **Not a vault** — your funds stay in your wallet until the agent moves them via your delegated permission.
-- ❌ **Not a yield aggregator** — CLOVE doesn't pool your capital with other users. Every wallet runs an isolated agent.
-- ❌ **Not "set and forget"** — the agent runs on your schedule, reports every action, and shows you exactly why. You can revoke any time.
+Get all three right and the 1Shot relayer redeems the full `user → Fund Manager → worker → relayer` chain, the `ERC20TransferAmountEnforcer` holds the cap, and overspend reverts. ✅
 
 ---
 
 ## Roadmap
 
-- [x] Plain-English workflow compiler (Venice AI)
-- [x] Visual canvas + node editor
-- [x] ERC-7715 grant + on-chain revocation
-- [x] x402 paid intelligence API
-- [x] Venice ReAct agent loop
-- [x] MongoDB agent memory
-- [x] 1Shot `executeAsDelegator` integration
-- [x] Real on-chain Morpho deposit (USDC approve + vault deposit)
-- [x] Telegram notifications
-- [x] Scheduling (Vercel cron + local 15s poll)
-- [ ] Real on-chain Sky, Lido, Uniswap, Aerodrome execution (UUIDs configured)
-- [ ] Strategy marketplace (browse + clone other users' strategies)
-- [ ] Performance analytics (PnL, gas spent, x402 cost over time)
-- [ ] Earnings dashboard for strategy authors
-- [ ] Multi-chain support (Optimism, Arbitrum)
-- [ ] Mobile responsive layout
-- [ ] Anthropic Claude as alternate agent model
+- Split the Fund Manager budget *across* workers (currently each worker is capped at the team budget)
+- Live portfolio view (read on-chain `mwUSDC`/`aBasUSDC` positions + one-click withdraw)
+- More protocols (Compound, Fluid) and chains
+- Auto-recovery cron for any deposit interrupted mid-run
 
 ---
 
 ## License
 
-MIT — see [LICENSE](LICENSE) for details.
-
----
+MIT
 
 ## Acknowledgments
 
-Built for the **ETHGlobal Open Agents Hackathon** (April 24 – May 6, 2026).
-
-Powered by:
-- [MetaMask Delegation Framework](https://github.com/MetaMask/delegation-framework) (ERC-7715 / ERC-7710)
-- [1Shot API](https://1shotapi.com) (managed smart account + bundler)
-- [Venice AI](https://venice.ai) (OpenAI-compatible, privacy-first LLM)
-- [x402 protocol](https://x402.org) (HTTP-native AI payments)
-- [Base](https://base.org) (the chain)
-- [MongoDB Atlas](https://www.mongodb.com/atlas) (free cluster works)
-- [Vercel](https://vercel.com) (deploy + cron)
-- [ReactFlow](https://reactflow.dev) (visual canvas)
-
----
-
-<div align="center">
-
-**CLOVE — Autonomous capital, quietly.**
-
-[Live demo](https://clove.vercel.app) · [Documentation](./TESTING.md) · [Twitter](https://twitter.com/clove_agent)
-
-</div>
+MetaMask Smart Accounts Kit · 1Shot API (Public Relayer) · Venice AI · Dune Analytics · Polymarket · Base · Polygon.
