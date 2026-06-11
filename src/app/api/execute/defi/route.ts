@@ -11,6 +11,9 @@ interface ExecRequest {
   protocol?: string;
   nodeConfig?: Record<string, unknown>;
   permissionsContext: string;
+  /** Copy-desk: root grant to retry with if the primary (scoped) context is
+   *  rejected by the relayer at redemption time. */
+  fallbackContext?: string;
   delegationManager: string;
   delegationId?: string;
   walletAddress: string;
@@ -156,103 +159,17 @@ const METHOD_REGISTRY = {
 
 type ActionKey = keyof typeof METHOD_REGISTRY;
 
-/**
- * Decode a permissionsContext into the delegationData array 1Shot expects.
- *
- * 1Shot's executeAsDelegator `delegationData` must be an array of JSON strings,
- * one per delegation in the chain (parent first, child last) with BigInts as
- * decimal strings — NOT the hex-encoded blob stored in the DB.
- *
- * Two storage formats exist:
- *   a) 0x + hex(JSON array)  — sub-agents from 1Shot redelegate → decode + split
- *   b) Raw ABI-encoded ERC-7715 context (root grants from MetaMask) — pass as-is
- *      in a single-element array; 1Shot handles ABI-encoded contexts too.
- */
-function decodeDelegationData(permissionsContext: string): string[] {
-  if (!permissionsContext.startsWith("0x")) return [permissionsContext];
-  try {
-    const json = Buffer.from(permissionsContext.slice(2), "hex").toString("utf-8");
-    // If valid JSON it's the [parent, redelegation] array from 1Shot redelegate.
-    const chain = JSON.parse(json) as unknown[];
-    if (Array.isArray(chain) && chain.length > 0) {
-      return chain.map(d => JSON.stringify(d));
-    }
-  } catch { /* not hex-encoded JSON — fall through */ }
-  // ABI-encoded root context from MetaMask: pass the hex string directly.
-  return [permissionsContext];
-}
-
-// ── 1Shot executeAsDelegator wrapper ────────────────────────────────────────
-async function executeViaOneShot(
-  methodId: string,
-  params: Record<string, unknown>,
-  permissionsContext: string,
-  memo: string,
-): Promise<{ txHash?: string; id?: string } | null> {
-  const apiKey    = process.env.ONESHOT_API_KEY;
-  const apiSecret = process.env.ONESHOT_API_SECRET;
-  const walletId  = process.env.ONESHOT_WALLET_ID;
-  if (!apiKey || !apiSecret || !walletId) return null;
-
-  // Decode to the array-of-JSON-strings format 1Shot requires.
-  const delegationData = decodeDelegationData(permissionsContext);
-
-  try {
-    // 1. Get OAuth token
-    const tokenRes = await fetch("https://api.1shotapi.com/v0/token", {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        grant_type:    "client_credentials",
-        client_id:     apiKey,
-        client_secret: apiSecret,
-      }),
-      signal: AbortSignal.timeout(8000),
-    });
-    if (!tokenRes.ok) {
-      console.warn("[execute/defi] 1Shot token failed:", await tokenRes.text());
-      return null;
-    }
-    const { access_token } = await tokenRes.json();
-
-    // 2. POST /methods/{id}/execute-as-delegator
-    const execRes = await fetch(
-      `https://api.1shotapi.com/v0/methods/${methodId}/execute-as-delegator`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${access_token}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          params,
-          walletId,
-          memo,
-          // delegationData: array of JSON strings, one per link in the chain
-          // (parent first, child last). BigInts must be decimal strings in JSON.
-          delegationData,
-        }),
-        signal: AbortSignal.timeout(30000),
-      }
-    );
-    if (!execRes.ok) {
-      const errText = await execRes.text();
-      console.warn(`[execute/defi] 1Shot exec failed (${execRes.status}):`, errText);
-      return null;
-    }
-    return await execRes.json();
-  } catch (e) {
-    console.warn("[execute/defi] 1Shot exception:", e);
-    return null;
-  }
-}
+// The authenticated 1Shot "executeAsDelegator" wrapper was removed — CLOVE
+// redeems exclusively through the public relayer (relayer_send7710Transaction),
+// which 1Shot builds on top of the dev platform. Delegations are built on our
+// side via smart-accounts-kit with the final hop to the relayer's target.
 
 export async function POST(request: NextRequest) {
   let body: ExecRequest;
   try { body = await request.json(); }
   catch { return NextResponse.json({ error: "Invalid body" }, { status: 400 }); }
 
-  const { action, protocol, nodeConfig = {}, permissionsContext, walletAddress } = body;
+  const { action, protocol, nodeConfig = {}, permissionsContext, fallbackContext, walletAddress } = body;
 
   const actionKey = (action ?? protocol ?? "") as ActionKey;
   const registryEntry = METHOD_REGISTRY[actionKey];
@@ -275,7 +192,6 @@ export async function POST(request: NextRequest) {
   }
 
   // ── Try real on-chain execution ───────────────────────────────────────────────
-  const methodId = process.env[registryEntry.methodIdEnv];
   const hasRealContext =
     permissionsContext &&
     permissionsContext !== "0xdemo" &&
@@ -344,10 +260,33 @@ export async function POST(request: NextRequest) {
         const tokenOut = nodeConfig?.tokenOut as string | undefined;
         const isCopySwap = (protocolName === "uniswap" || protocolName === "aerodrome")
           && !!tokenOut && /^0x[a-fA-F0-9]{40}$/.test(tokenOut);
+
+        // VENUE ROUTING — resolve the real pool (DEX + fee tier) BEFORE the
+        // relayer moves any USDC. forwardSwap was hardcoded to Uniswap 0.3%,
+        // which reverts for tokens whose depth lives at 0.01%/1% or on
+        // Aerodrome — and a post-transfer revert parks the user's USDC in the
+        // contract. Scanning first means a routing problem costs nothing.
+        let swapVenue: { useAerodrome: boolean; fee: number } | null = null;
+        if (isCopySwap) {
+          const { pickSwapVenue } = await import("@/lib/web3/cloveAutoDeposit");
+          swapVenue = await pickSwapVenue(tokenOut as `0x${string}`);
+          if (!swapVenue) {
+            // No pool on Uniswap V3 OR Aerodrome — abort before any USDC moves.
+            return NextResponse.json({
+              submitted: false,
+              error: `No liquidity pool exists for token ${tokenOut} on Uniswap V3 or Aerodrome — copy not possible. No funds were moved.`,
+              code: "no-pool",
+              action: actionKey, protocol,
+            }, { status: 400 });
+          }
+        }
+
         const completeForward = async (): Promise<`0x${string}`> => {
           if (isCopySwap) {
             const { forwardSwapToken } = await import("@/lib/web3/cloveAutoDeposit");
-            return forwardSwapToken(walletAddress as `0x${string}`, tokenOut as `0x${string}`, defaultAmount, protocolName === "aerodrome");
+            const useAero = swapVenue?.useAerodrome ?? (protocolName === "aerodrome");
+            const fee     = swapVenue?.fee ?? 3000;
+            return forwardSwapToken(walletAddress as `0x${string}`, tokenOut as `0x${string}`, defaultAmount, useAero, fee);
           }
           const { forwardToProtocol } = await import("@/lib/web3/cloveAutoDeposit");
           return forwardToProtocol(walletAddress as `0x${string}`, protocolName, defaultAmount);
@@ -355,13 +294,42 @@ export async function POST(request: NextRequest) {
 
         // Step 1: relayer sends USDC to CloveAutoDeposit via delegated transfer.
         // The erc20-token-periodic enforcer allows USDC.transfer(contract, amount) ✅
-        const relayResult = await executeViaPublicRelayer({
-          userPermissionsContext: permissionsContext,
+        //
+        // REDEMPTION FALLBACK (copy desk): a worker's primary context is a SCOPED
+        // multi-hop chain. If the relayer rejects that chain, retry once with the
+        // root grant (fallbackContext) so the swap still lands — the per-tier cap
+        // is then enforced off-chain by the budget guard instead of the on-chain
+        // enforcer. Try contexts in order; stop at the first that confirms.
+        const relayContexts = [permissionsContext]
+          .concat(fallbackContext && fallbackContext !== permissionsContext ? [fallbackContext] : []);
+        let relayResult = await executeViaPublicRelayer({
+          userPermissionsContext: relayContexts[0],
           recipient:              autoDepositContract,
           workAmountUsdc:         Number(defaultAmount) / 1e6,
           memo:                   `CLOVE: USDC→${protocolName} via CloveAutoDeposit`,
           authorizationList,
         });
+        if ((relayResult.status === "failed" || !relayResult.txHash) && relayContexts[1]) {
+          // DOUBLE-SPEND GUARD: the relayer sometimes reports "failed" even though
+          // the USDC.transfer in the bundle DID land on-chain. Re-transferring via
+          // the fallback would move USDC twice. Only retry if the USDC is NOT
+          // already parked in the contract; otherwise fall through to the recovery
+          // path below, which forwards the already-delivered USDC.
+          const { getContractUsdcBalance } = await import("@/lib/web3/cloveAutoDeposit");
+          const parked = await getContractUsdcBalance();
+          if (parked < defaultAmount) {
+            console.warn("[execute/defi] scoped context rejected (no USDC moved) — retrying with root fallback");
+            relayResult = await executeViaPublicRelayer({
+              userPermissionsContext: relayContexts[1],
+              recipient:              autoDepositContract,
+              workAmountUsdc:         Number(defaultAmount) / 1e6,
+              memo:                   `CLOVE: USDC→${protocolName} (root fallback)`,
+              authorizationList,
+            });
+          } else {
+            console.warn("[execute/defi] primary relay reported failed but USDC already in contract — skipping fallback to avoid double-spend");
+          }
+        }
 
         // Call forward() when:
         //   a) Relayer confirmed with txHash (normal case), OR
@@ -455,27 +423,11 @@ export async function POST(request: NextRequest) {
     } catch (e) {
       console.warn("[execute/defi] Public relayer exception:", e instanceof Error ? e.message : e);
     }
-
-    // ── Path B: Authenticated 1Shot API (fallback when method UUIDs are set) ──
-    if (methodId) {
-      const oneshotParams = (registryEntry.buildParams as (a: bigint, b: `0x${string}`, c?: Record<string, unknown>) => Record<string, unknown>)(
-        defaultAmount, walletAddress as `0x${string}`, nodeConfig,
-      );
-      const result = await executeViaOneShot(methodId, oneshotParams, permissionsContext, `CLOVE: ${actionKey}`);
-      if (result) {
-        return NextResponse.json({
-          submitted:       true,
-          txHash:          result.txHash,
-          transactionId:   result.id,
-          action:          actionKey,
-          protocol,
-          contractAddress: registryEntry.contract,
-          amount:          defaultAmount.toString(),
-          via:             "1shot",
-        });
-      }
-    }
-    // Both paths failed — hard fail, no demo fallback.
+    // NOTE: the old authenticated 1Shot "executeAsDelegator" fallback was removed.
+    // Per 1Shot: the public relayer is built on top of the dev platform, so when
+    // you use the relayer you should NOT call the dev-platform execute endpoint —
+    // and CLOVE's grants delegate to the relayer target, not the 1Shot server
+    // wallet, so executeAsDelegator could never redeem them anyway.
   }
 
   // No real context = no execution. Return a clear error.
@@ -488,7 +440,7 @@ export async function POST(request: NextRequest) {
 
   // Real context exists but both execution paths failed — surface the error.
   return NextResponse.json({
-    error: "Execution failed via both 1Shot Public Relayer and executeAsDelegator. Check server logs.",
+    error: "Execution failed via the 1Shot public relayer. Check server logs.",
     action: actionKey,
     protocol,
     submitted: false,

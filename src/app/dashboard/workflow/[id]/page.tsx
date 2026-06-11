@@ -624,6 +624,101 @@ function HistoryPacketRow({ packet, names }: { packet: AgentHandoffPacket; names
   );
 }
 
+// ── Copy Desk view (two-column, risk-tiered) ──────────────────────────────────
+// A copy desk is a Fund Manager splitting capital into two PARALLEL tiers — not a
+// linear pipeline. Blue = lower risk (Conservative), amber = higher risk
+// (Aggressive); colour encodes risk, nothing else.
+const TIER_BLUE  = "#3D9BFF";
+const TIER_AMBER = "#EFA235";
+
+function DeskTierCard({ agent, label, sub, color, icon, runs }: {
+  agent: Agent; label: string; sub: string; color: string; icon: string; runs: WorkflowRun[];
+}) {
+  const cap   = Number(agent.delegationCap ?? agent.budgetUsdc ?? 0);
+  const mine   = runs.filter(r => r.agentName === agent.name).slice(0, 4);
+  const isLive = agent.status === "planning" || agent.status === "executing" || agent.status === "reflecting";
+  return (
+    <div style={{ background: INK_1, border: `1px solid ${isLive ? color + "66" : LINE_MID}`, borderRadius: 12, padding: 16,
+      boxShadow: isLive ? `0 0 0 1px ${color}22, 0 8px 30px -14px ${color}55` : "none" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 3 }}>
+        <span style={{ fontSize: 16 }}>{icon}</span>
+        <span style={{ fontSize: 14, fontWeight: 600, color: TEXT, letterSpacing: "-0.01em" }}>{label}</span>
+        {isLive && <span style={{ marginLeft: "auto", width: 7, height: 7, borderRadius: "50%", background: color, animation: "pulse 1.2s infinite" }} />}
+      </div>
+      <div style={{ fontSize: 11.5, color: TEXT2, marginBottom: 12 }}>{sub}</div>
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
+        <span style={{ fontSize: 10.5, background: `${color}1A`, color, padding: "3px 10px", borderRadius: 20, border: `1px solid ${color}3a` }}>cap {cap} USDC · on-chain</span>
+        <span style={{ fontSize: 10.5, background: "rgba(244,241,234,0.05)", color: TEXT2, padding: "3px 10px", borderRadius: 20 }}>
+          {agent.totalRuns} runs · last: {agent.lastAction ?? "—"}
+        </span>
+      </div>
+      {mine.length === 0 ? (
+        <div style={{ fontSize: 11, color: MID, fontStyle: "italic" }}>No copies yet — runs on its schedule.</div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {mine.map(r => (
+            <div key={r.runId} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 11, padding: "7px 10px", borderRadius: 8, background: `${color}0D`, border: `1px solid ${color}22` }}>
+              <span style={{ width: 6, height: 6, borderRadius: "50%", background: r.success ? color : MID, flexShrink: 0 }} />
+              <span style={{ color: TEXT, fontWeight: 500, textTransform: "uppercase", fontSize: 10 }}>{r.action}</span>
+              <span style={{ color: MID, marginLeft: "auto", fontSize: 9.5 }}>{ago(r.startedAt)}</span>
+              {r.txHash && (
+                <a href={`https://basescan.org/tx/${r.txHash}`} target="_blank" rel="noopener noreferrer" style={{ color, textDecoration: "none", fontSize: 9.5 }}>↗ tx</a>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CopyDeskView({ workflow, agents, runs }: { workflow: Workflow; agents: Agent[]; runs: WorkflowRun[] }) {
+  const fm   = agents.find(a => a.name === "Fund Manager");
+  const cons = agents.find(a => /conservative/i.test(a.name));
+  const aggr = agents.find(a => /aggressive/i.test(a.name));
+  const consCap = Number(cons?.delegationCap ?? cons?.budgetUsdc ?? 0);
+  const aggrCap = Number(aggr?.delegationCap ?? aggr?.budgetUsdc ?? 0);
+  const total   = consCap + aggrCap || 1;
+  const consPct = Math.round((consCap / total) * 100);
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      {/* Fund Manager — the split */}
+      <div style={{ background: INK_1, border: `1px solid ${LINE_MID}`, borderRadius: 12, padding: "16px 18px" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
+          <span style={{ width: 32, height: 32, borderRadius: 8, background: "rgba(244,241,234,0.05)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16 }}>🏦</span>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 14, fontWeight: 600, color: TEXT }}>{fm?.name ?? "Fund Manager"}</div>
+            <div style={{ fontSize: 11.5, color: TEXT2 }}>Splits the budget · the chain enforces each cap</div>
+          </div>
+          <div style={{ fontSize: 11, color: MID, fontVariantNumeric: "tabular-nums" }}>{workflow.budgetUsdc} USDC</div>
+        </div>
+        <div style={{ display: "flex", height: 9, borderRadius: 20, overflow: "hidden", border: `1px solid ${LINE}` }}>
+          <div style={{ width: `${consPct}%`, background: TIER_BLUE }} />
+          <div style={{ width: `${100 - consPct}%`, background: TIER_AMBER }} />
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10.5, color: TEXT2, marginTop: 6 }}>
+          <span>{consPct}% conservative · {consCap} USDC</span>
+          <span>{100 - consPct}% aggressive · {aggrCap} USDC</span>
+        </div>
+      </div>
+
+      {/* Two parallel tiers */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 14 }}>
+        {cons && <DeskTierCard agent={cons} label="Conservative copier" sub="Blue chips · liquidity ≥ $10M" color={TIER_BLUE}  icon="🛡️" runs={runs} />}
+        {aggr && <DeskTierCard agent={aggr} label="Aggressive copier"  sub="Small caps · liquidity < $10M" color={TIER_AMBER} icon="⚡" runs={runs} />}
+      </div>
+
+      {/* Legend */}
+      <div style={{ display: "flex", gap: 18, fontSize: 11, color: TEXT2 }}>
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><span style={{ width: 9, height: 9, borderRadius: 2, background: TIER_BLUE }} /> lower risk</span>
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><span style={{ width: 9, height: 9, borderRadius: 2, background: TIER_AMBER }} /> higher risk</span>
+        <span style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 6, color: MID }}>🔒 caps enforced on-chain</span>
+      </div>
+    </div>
+  );
+}
+
 // ── Main page ─────────────────────────────────────────────────────────────────
 export default function WorkflowDetailPage() {
   const router       = useRouter();
@@ -966,7 +1061,11 @@ export default function WorkflowDetailPage() {
     } finally { setAllocating(false); }
   }, [workflowId, loadWorkflow]);
 
-  const isOrchestrated = agents.length === 3; // 3-agent workflow = Scout/Risk/Executor
+  // A copy DESK (Fund Manager + Conservative/Aggressive Copiers) is NOT an
+  // orchestrated Scout→Risk→Executor pipeline — its tiers run independently via
+  // run-stream. So it must use the per-agent runner, never "Run Orchestrated".
+  const isCopyDesk = agents.some(a => a.name === "Fund Manager") && agents.some(a => /copier/i.test(a.name));
+  const isOrchestrated = agents.length === 3 && !isCopyDesk; // 3-agent team = Scout/Risk/Executor
   const isLiveRunning  = live.phase !== "idle" && live.phase !== "complete" && live.phase !== "failed";
   const canRun         = isOrchestrated ? !isLiveRunning : !running && agents.length > 0;
 
@@ -1180,8 +1279,10 @@ export default function WorkflowDetailPage() {
       )}
 
       {tab === "timeline" && (
-        <section style={{ overflowY: "auto", padding: "28px 40px", maxWidth: 720, width: "100%" }}>
-          <AgentConversationTimeline live={live} history={handoffs} agents={agents} />
+        <section style={{ overflowY: "auto", padding: "28px 40px", maxWidth: isCopyDesk ? 760 : 720, width: "100%" }}>
+          {isCopyDesk
+            ? <CopyDeskView workflow={workflow} agents={agents} runs={runs} />
+            : <AgentConversationTimeline live={live} history={handoffs} agents={agents} />}
         </section>
       )}
 

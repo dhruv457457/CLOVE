@@ -336,6 +336,69 @@ export async function forwardToProtocol(
   return hash;
 }
 
+// ── Swap venue / fee-tier discovery ──────────────────────────────────────────
+// forwardSwap was hardcoded to Uniswap's 0.3% tier; many tokens keep their depth
+// elsewhere (EURC/USDC at 0.01%, exotic tokens on Aerodrome). Probe the Uniswap
+// V3 factory for every tier and pick the deepest pool — BEFORE any USDC moves,
+// so "no pool anywhere" fails clean instead of parking funds in the contract.
+
+const USDC_BASE        = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" as const;
+const UNI_V3_FACTORY   = "0x33128a8fC17869897dcE68Ed026d694621f6FDfD" as const;
+const AERO_FACTORY     = "0x420DD381b31aEf6683db6B902084cB0FFECe40Da" as const;
+const FEE_TIERS        = [100, 500, 3000, 10000] as const;
+const FACTORY_ABI = parseAbi([
+  "function getPool(address tokenA, address tokenB, uint24 fee) view returns (address)",
+]);
+const AERO_FACTORY_ABI = parseAbi([
+  "function getPool(address tokenA, address tokenB, bool stable) view returns (address)",
+]);
+const POOL_LIQ_ABI = parseAbi(["function liquidity() view returns (uint128)"]);
+
+export interface SwapVenue {
+  useAerodrome: boolean;
+  fee: number;            // Uniswap fee tier (ignored for Aerodrome)
+  source: "uniswap-pool-scan" | "aerodrome-pool-scan";
+}
+
+/**
+ * Pick the venue + fee tier for a USDC→tokenOut swap by scanning REAL pools:
+ * deepest Uniswap V3 tier first, then an Aerodrome volatile pool. Returns null
+ * when NEITHER venue has a pool — callers must abort BEFORE moving any USDC
+ * (a post-transfer revert parks the user's funds in the contract).
+ */
+export async function pickSwapVenue(tokenOut: `0x${string}`): Promise<SwapVenue | null> {
+  const pub = createPublicClient({ chain: base, transport: http(RPC) });
+  let bestFee = 0; let bestLiq = -1n;
+  await Promise.all(FEE_TIERS.map(async (fee) => {
+    try {
+      const pool = await pub.readContract({
+        address: UNI_V3_FACTORY, abi: FACTORY_ABI, functionName: "getPool",
+        args: [USDC_BASE, tokenOut, fee],
+      }) as `0x${string}`;
+      if (!pool || /^0x0+$/.test(pool)) return;
+      const liq = await pub.readContract({ address: pool, abi: POOL_LIQ_ABI, functionName: "liquidity" }) as bigint;
+      if (liq > bestLiq) { bestLiq = liq; bestFee = fee; }
+    } catch { /* tier unavailable — skip */ }
+  }));
+  if (bestFee > 0 && bestLiq > 0n) {
+    console.log(`[pickSwapVenue] ${tokenOut}: Uniswap fee tier ${bestFee} (liquidity ${bestLiq})`);
+    return { useAerodrome: false, fee: bestFee, source: "uniswap-pool-scan" };
+  }
+  // Aerodrome volatile pool (matches the contract's _swapAerodrome route).
+  try {
+    const pool = await pub.readContract({
+      address: AERO_FACTORY, abi: AERO_FACTORY_ABI, functionName: "getPool",
+      args: [USDC_BASE, tokenOut, false],
+    }) as `0x${string}`;
+    if (pool && !/^0x0+$/.test(pool)) {
+      console.log(`[pickSwapVenue] ${tokenOut}: Aerodrome volatile pool ${pool}`);
+      return { useAerodrome: true, fee: 3000, source: "aerodrome-pool-scan" };
+    }
+  } catch { /* factory read failed — treat as no pool */ }
+  console.warn(`[pickSwapVenue] ${tokenOut}: NO pool on Uniswap V3 or Aerodrome — swap must not proceed`);
+  return null;
+}
+
 /**
  * COPY-TRADE v3 — swap USDC (already in the contract) into ANY tokenOut and send
  * it to the user. Uses the new forwardSwap (Uniswap V3) / forwardSwapAero

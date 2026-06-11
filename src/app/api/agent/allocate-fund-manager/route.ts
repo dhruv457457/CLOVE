@@ -78,15 +78,14 @@ export async function POST(req: NextRequest) {
 
   for (const a of agents) {
     const cap = Number(a.budgetUsdc);
-    const chainId = a.chainId ?? 8453;
-    // Skip: the Fund Manager itself (it HOLDS the root grant, not a scoped slice),
-    // read-only scouts (cap 0), and Polygon/Polymarket agents (granted separately).
+    // Skip the Fund Manager itself (it HOLDS the root grant, not a scoped slice)
+    // and read-only scouts (cap 0).
     if (a.typeConfig?.role === "fund-manager") continue;
-    if (cap <= 0 || chainId === 137) continue;
+    if (cap <= 0) continue;
 
     const protocols = resolveProtocols(a);
     try {
-      const chain = await buildRedeemableWorkerChain(rootContext, a.id, protocols, cap, chainId);
+      const chain = await buildRedeemableWorkerChain(rootContext, a.id, protocols, cap, a.chainId ?? 8453);
       await setDelegation(a.id, {
         parentAgentId:            a.parentAgentId ?? null,
         delegationContext:        chain.context,

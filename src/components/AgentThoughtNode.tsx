@@ -38,10 +38,34 @@ const TOOL: Record<string, { label: string; icon: React.ReactNode; tint: string 
   rebalance:             { label: "Rebalancing position",     icon: <IconSwap />,   tint: ACCENT },
   notifyUser:            { label: "Sending Telegram",         icon: <IconSend />,   tint: "#229ED9" },
   checkWhaleTrades:      { label: "Tracking whale wallets",   icon: <IconWhale />,  tint: "#7C5CFF" },
+  discoverWhales:        { label: "Discovering smart money",  icon: <IconWhale />,  tint: "#7C5CFF" },
+  executeCopyTrade:      { label: "Mirroring smart money",    icon: <IconBolt />,   tint: "#9C8BFF" },
+  checkRealYields:       { label: "Reading DeFiLlama yields", icon: <IconChart />,  tint: ACCENT },
+  monitorPositions:      { label: "Reading positions",        icon: <IconChart />,  tint: TEXT2 },
   checkNarratives:      { label: "Reading market narrative", icon: <IconNews />,   tint: "#F2B85C" },
   addThought:            { label: "Thinking",                 icon: <IconSpark />,  tint: TEXT2 },
   revisePlan:            { label: "Revising plan",            icon: <IconSwap />,   tint: PEND  },
 };
+
+/**
+ * Token logo via DexScreener's CDN (no API key). Renders nothing on 404 so
+ * unknown tokens degrade to text-only rows.
+ */
+function TokenLogo({ address, size = 16 }: { address?: string; size?: number }) {
+  const [failed, setFailed] = React.useState(false);
+  if (!address || !/^0x[a-fA-F0-9]{40}$/.test(address) || failed) return null;
+  return (
+    // eslint-disable-next-line @next/next/no-img-element
+    <img
+      src={`https://dd.dexscreener.com/ds-data/tokens/base/${address.toLowerCase()}.png`}
+      alt=""
+      width={size}
+      height={size}
+      onError={() => setFailed(true)}
+      style={{ borderRadius: "50%", flexShrink: 0, background: "rgba(244,241,234,0.06)" }}
+    />
+  );
+}
 
 // ── Main node ────────────────────────────────────────────────────────────────────
 
@@ -314,10 +338,14 @@ function ToolResultNode({ content }: { content: Record<string, unknown> }) {
   const receivedAmount = typeof content.receivedAmount === "string" ? content.receivedAmount : undefined;
   // Smart-money board (copy-trade): recent whale buys + convergence signal.
   const whaleTrades = Array.isArray(content.trades)
-    ? (content.trades as Array<{ wallet?: string; symbol?: string; amount?: string; ageMinutes?: number; basescanUrl?: string }>)
+    ? (content.trades as Array<{ wallet?: string; symbol?: string; amount?: string; ageMinutes?: number; basescanUrl?: string; token?: string }>)
     : undefined;
   const convergence = Array.isArray(content.convergence)
-    ? (content.convergence as Array<{ target?: string; walletCount?: number }>)
+    ? (content.convergence as Array<{ target?: string; walletCount?: number; token?: string; liquidityUsd?: number }>)
+    : undefined;
+  // Next copy target (discovery mode) — what the agent will actually mirror.
+  const copyTarget = (content.copyTarget && typeof content.copyTarget === "object")
+    ? content.copyTarget as { tokenAddress?: string; symbol?: string; walletCount?: number; liquidityUsd?: number }
     : undefined;
 
   return (
@@ -344,7 +372,9 @@ function ToolResultNode({ content }: { content: Record<string, unknown> }) {
           <div style={{ display: "flex", flexDirection: "column", gap: 6, padding: "8px 10px", borderRadius: 9, background: "rgba(124,92,255,0.07)", border: "1px solid rgba(124,92,255,0.22)" }}>
             {convergence && convergence.length > 0 && (
               <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 700, color: "#B9A8FF" }}>
-                🎯 {convergence[0].walletCount} wallets bought <span style={{ color: TEXT }}>${convergence[0].target}</span>
+                🎯 {convergence[0].walletCount} wallets bought
+                <TokenLogo address={convergence[0].token} size={15} />
+                <span style={{ color: TEXT }}>${convergence[0].target}</span>
               </div>
             )}
             {whaleTrades && whaleTrades.length > 0 && (
@@ -355,10 +385,24 @@ function ToolResultNode({ content }: { content: Record<string, unknown> }) {
                      style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: TEXT2, textDecoration: "none" }}>
                     <span style={{ fontFamily: "var(--mono, monospace)", color: "#9C8BFF" }}>{(t.wallet ?? "").slice(0, 6)}…</span>
                     <span style={{ color: MID }}>bought</span>
+                    <TokenLogo address={t.token} size={13} />
                     <span style={{ color: TEXT, fontWeight: 600 }}>{t.amount} {t.symbol}</span>
                     <span style={{ marginLeft: "auto", color: MID, fontSize: 9.5 }}>{t.ageMinutes}m ↗</span>
                   </a>
                 ))}
+              </div>
+            )}
+            {/* Next copy target — what the agent will actually mirror (post diversity/tier filters) */}
+            {copyTarget?.tokenAddress && (
+              <div style={{ display: "flex", alignItems: "center", gap: 6, paddingTop: 5, borderTop: "1px solid rgba(124,92,255,0.18)", fontSize: 11 }}>
+                <span style={{ fontSize: 9.5, color: MID, textTransform: "uppercase", letterSpacing: "0.08em" }}>Next copy</span>
+                <TokenLogo address={copyTarget.tokenAddress} size={14} />
+                <span style={{ color: TEXT, fontWeight: 700 }}>${copyTarget.symbol}</span>
+                {typeof copyTarget.liquidityUsd === "number" && copyTarget.liquidityUsd > 0 && (
+                  <span style={{ marginLeft: "auto", color: MID, fontSize: 9.5 }}>
+                    ${(copyTarget.liquidityUsd / 1e6).toFixed(1)}M liq
+                  </span>
+                )}
               </div>
             )}
           </div>
@@ -381,7 +425,8 @@ function ToolResultNode({ content }: { content: Record<string, unknown> }) {
         {receipt?.symbol && (txHash || submitted) && (
           <div style={{ display: "flex", flexDirection: "column", gap: 2, padding: "6px 9px", borderRadius: 7, background: "rgba(124,92,255,0.08)", border: "1px solid rgba(124,92,255,0.22)" }}>
             <span style={{ fontSize: 10, color: MID, textTransform: "uppercase", letterSpacing: "0.08em" }}>Received in wallet</span>
-            <span style={{ fontSize: 12.5, color: "#B9A8FF", fontWeight: 600 }}>
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12.5, color: "#B9A8FF", fontWeight: 600 }}>
+              <TokenLogo address={receipt.address} size={15} />
               {receivedAmount ? `${receivedAmount} ` : ""}{receipt.symbol}
               {receipt.name ? <span style={{ color: MID, fontWeight: 400 }}> · {receipt.name}</span> : null}
             </span>

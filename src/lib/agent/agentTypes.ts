@@ -18,9 +18,16 @@ import type { AgentType } from "./agents";
  */
 
 export const CHAIN = {
-  BASE:    8453,
-  POLYGON: 137,
+  BASE: 8453,
 } as const;
+
+/**
+ * Copy desk: pool-liquidity boundary (USD) between the Conservative tier
+ * (only tokens at/above this depth) and the Aggressive tier (below it).
+ * Single source of truth — executor creation AND runtime tier filtering both
+ * read this, so the two can never silently diverge.
+ */
+export const COPY_TIER_LIQUIDITY_BOUNDARY_USD = 10_000_000;
 
 export interface AgentTypeDef {
   type:          AgentType;

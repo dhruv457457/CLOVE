@@ -112,6 +112,12 @@ export interface Agent {
   delegationManagerAddress?: string;
   /** Max USDC this agent can spend (the cap baked into the delegation) */
   delegationCap?:            string;
+  /** Copy-desk workers hold a SCOPED (on-chain-capped) delegation as their primary
+   *  context. If the relayer rejects that multi-hop chain at redemption time, the
+   *  executor retries with this root grant so the swap still lands (the cap is then
+   *  enforced off-chain by the budget guard). Keeps execution bulletproof while the
+   *  on-chain enforcer remains the preferred path. */
+  rootFallbackContext?:      string;
   /** "active" once delegation is granted; "revoked" after disableDelegation lands on-chain */
   delegationStatus?:         "active" | "revoked" | "pending" | "none";
   /** ISO date when revoked */

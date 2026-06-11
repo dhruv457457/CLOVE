@@ -260,6 +260,10 @@ export interface ExecutorContext {
   budgetUsedUsdc?:     number;
   /** Chain the agent runs on (8453 Base). */
   chainId?:            number;
+  /** Copy-desk workers: the root grant to retry with if the relayer rejects the
+   *  worker's scoped (multi-hop) delegation at redemption time. Keeps execution
+   *  alive while the on-chain enforcer stays the preferred path. */
+  fallbackPermissionsContext?: string;
   /** Agent-type-specific config (tracked wallets, edge threshold, topic, etc.). */
   typeConfig?:         Record<string, unknown>;
 }
@@ -428,6 +432,7 @@ Return ONLY JSON: { "riskLevel": "LOW"|"MEDIUM"|"HIGH", "safeToExecute": true|fa
           protocol,
           nodeConfig:         { amount, platform: protocol, action },
           permissionsContext: ctx.permissionsContext,
+          fallbackContext:    ctx.fallbackPermissionsContext,
           delegationManager:  ctx.delegationManager  ?? "0x",
           delegationId:       ctx.delegationId,
           walletAddress:      ctx.walletAddress,
@@ -575,12 +580,80 @@ Return ONLY JSON: { "riskLevel": "LOW"|"MEDIUM"|"HIGH", "safeToExecute": true|fa
         note?: string;
       };
       const convergence = data.convergence ?? [];
-      // Strongest converged token that carries a REAL contract address (symbols are
-      // resolved to liquid Base addresses upstream). This is what the agent copies
-      // via executeCopyTrade(tokenAddress=...). Rank by convergence (walletCount).
-      const topCopyable = convergence
+
+      // ── Copy-target selection pipeline ─────────────────────────────────────
+      // 1. Only tokens with a REAL contract address (symbols are resolved to
+      //    liquid Base addresses upstream), ranked by convergence strength.
+      let candidates = convergence
         .filter(c => typeof c.token === "string" && /^0x[a-fA-F0-9]{40}$/.test(c.token!) && !/^0x0+$/.test(c.token!))
-        .sort((a, b) => b.walletCount - a.walletCount)[0];
+        .sort((a, b) => b.walletCount - a.walletCount);
+
+      // 2. RISK TIER (copy desk): a conservative copier only touches deep-liquidity
+      //    blue chips; an aggressive copier hunts the smaller caps. Tokens without
+      //    a known liquidity figure are excluded when a tier is active — "unknown
+      //    depth" is not a thing either tier should buy blind.
+      const { COPY_TIER_LIQUIDITY_BOUNDARY_USD } = await import("@/lib/agent/agentTypes");
+      const tierCfg = ctx.typeConfig as { copyTier?: string; minLiquidityUsd?: number; maxLiquidityUsd?: number } | undefined;
+      const tier    = String(tierCfg?.copyTier ?? "");
+      const minLiq  = Number(tierCfg?.minLiquidityUsd) || (tier === "conservative" ? COPY_TIER_LIQUIDITY_BOUNDARY_USD : 0);
+      const maxLiq  = Number(tierCfg?.maxLiquidityUsd) || (tier === "aggressive"   ? COPY_TIER_LIQUIDITY_BOUNDARY_USD : 0);
+      if (minLiq > 0) candidates = candidates.filter(c => (c.liquidityUsd ?? 0) >= minLiq);
+      if (maxLiq > 0) candidates = candidates.filter(c => typeof c.liquidityUsd === "number" && c.liquidityUsd < maxLiq);
+
+      // 3. DIVERSITY: skip tokens the owner already holds (checked on-chain — the
+      //    DB doesn't reliably know copy positions). Without this the agent buys
+      //    the same top token (cbBTC) every single run.
+      let allHeld = false;
+      try {
+        const { createPublicClient, http, parseAbi } = await import("viem");
+        const { base } = await import("viem/chains");
+        const pub = createPublicClient({ chain: base, transport: http(process.env.BASE_RPC ?? "https://mainnet.base.org") });
+        const balAbi = parseAbi(["function balanceOf(address) view returns (uint256)"]);
+        const flags = await Promise.all(candidates.slice(0, 6).map(async c => {
+          try {
+            const bal = await pub.readContract({
+              address: c.token as `0x${string}`, abi: balAbi,
+              functionName: "balanceOf", args: [ctx.walletAddress as `0x${string}`],
+            }) as bigint;
+            return bal === 0n;   // true = not held = copyable
+          } catch { return true; } // can't read → assume not held (fail open)
+        }));
+        const unheld = candidates.slice(0, 6).filter((_, i) => flags[i]);
+        allHeld = candidates.length > 0 && unheld.length === 0;
+        candidates = unheld;
+      } catch { /* RPC unavailable — keep unfiltered candidates (fail open) */ }
+
+      // 4. SWAPPABILITY: only keep tokens the contract can actually swap —
+      //    Uniswap V3 (any fee tier) OR Aerodrome VOLATILE. DexScreener "liquid"
+      //    is NOT enough: stablecoins like EURC/msUSD hold their depth in STABLE
+      //    pools the contract can't route, so they'd abort at execution. Probe the
+      //    real pools here so the agent never SELECTS a token it can't swap.
+      let noSwappablePool = false;
+      try {
+        const { pickSwapVenue } = await import("@/lib/web3/cloveAutoDeposit");
+        const probe = candidates.slice(0, 5);
+        const swappable: typeof candidates = [];
+        // Probe SEQUENTIALLY, not Promise.all: checking many tokens × fee tiers
+        // concurrently throttles the public Base RPC and falsely reports "no pool"
+        // for tokens that actually have one. Stop after a couple of hits — the top
+        // one (highest convergence) is what gets copied.
+        for (const c of probe) {
+          const v = await pickSwapVenue(c.token as `0x${string}`).catch(() => null);
+          if (v) swappable.push(c);
+          if (swappable.length >= 2) break;
+        }
+        if (swappable.length > 0) {
+          candidates = swappable;
+        } else if (probe.length > 0) {
+          // Converged tokens exist but none are swappable by the contract.
+          noSwappablePool = true;
+          candidates = [];
+        }
+      } catch { /* pool probe unavailable — keep candidates (fail open) */ }
+
+      const topCopyable  = candidates[0];
+      const alternatives = candidates.slice(1, 3).map(c => ({ tokenAddress: c.token, symbol: c.target, walletCount: c.walletCount, liquidityUsd: c.liquidityUsd }));
+
       return { tool: name, args, result: JSON.stringify({
         discoveredCount: data.wallets?.length ?? 0,
         wallets:         data.wallets ?? [],
@@ -589,15 +662,22 @@ Return ONLY JSON: { "riskLevel": "LOW"|"MEDIUM"|"HIGH", "safeToExecute": true|fa
         trades:          (data.trades ?? []).slice(0, 15),
         convergence,
         // Tell the agent exactly what to copy. executeCopyTrade needs a 0x address;
-        // pass convergence[].token (NOT the symbol). If no token here has an
-        // address, the convergence source only gave symbols — copy is not possible
-        // for those; say so rather than guessing.
+        // pass convergence[].token (NOT the symbol). Already-held tokens are
+        // filtered out (diversity), and tier liquidity rules are applied.
         copyTarget: topCopyable
-          ? { tokenAddress: topCopyable.token, symbol: topCopyable.target, walletCount: topCopyable.walletCount }
+          ? { tokenAddress: topCopyable.token, symbol: topCopyable.target, walletCount: topCopyable.walletCount, liquidityUsd: topCopyable.liquidityUsd }
           : null,
+        alternatives,
+        ...(tier ? { copyTier: tier } : {}),
         instruction: topCopyable
           ? `To copy, call executeCopyTrade with tokenAddress="${topCopyable.token}" (symbol ${topCopyable.target}, ${topCopyable.walletCount} wallets). Use the ADDRESS, not the symbol.`
-          : "No converged token included a contract address — cannot copy these by symbol alone. Report this and hold.",
+          : allHeld
+            ? "Every converged token is already in the portfolio — diversity rule says do not double-buy. Report this and hold."
+            : noSwappablePool
+              ? "Converged tokens have no Uniswap V3 or Aerodrome-volatile pool the contract can route (e.g. stablecoins live in stable pools) — nothing swappable this run. Report this and hold."
+              : tier
+                ? `No converged token fits the ${tier} tier's liquidity rules this run. Report this and hold.`
+                : "No converged token included a usable contract address — cannot copy by symbol alone. Report this and hold.",
         source:          "basescan",
         note:            data.note,
       })};
@@ -702,6 +782,7 @@ Return ONLY JSON: { "riskLevel": "LOW"|"MEDIUM"|"HIGH", "safeToExecute": true|fa
           protocol,
           nodeConfig:         { amount, platform: protocol, action: "swap", tokenSymbol, tokenOut },
           permissionsContext: ctx.permissionsContext,
+          fallbackContext:    ctx.fallbackPermissionsContext,
           delegationManager:  ctx.delegationManager  ?? "0x",
           delegationId:       ctx.delegationId,
           walletAddress:      ctx.walletAddress,

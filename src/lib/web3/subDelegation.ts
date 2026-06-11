@@ -181,10 +181,9 @@ export async function createProtocolScopedDelegation(
 
 // ── Full redeemable worker chain (user → session → worker → relayer) ────────────
 
-/** Per-chain 1Shot relayer target (the final delegate that redeems + sponsors gas). */
+/** 1Shot relayer target (the final delegate that redeems + sponsors gas). Base only. */
 const RELAYER_TARGETS: Record<number, `0x${string}`> = {
   8453: "0x26a529124f0bbf9af9d8f9f84a43efe47cf1199a",
-  137:  "0x38663d5e9d7b930bea883d27ea13e731242865fa",
 };
 
 export interface WorkerChainResult {

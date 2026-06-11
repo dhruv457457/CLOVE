@@ -1,10 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createPublicClient, http, formatUnits } from "viem";
+import { createPublicClient, http, formatUnits, parseAbi, parseAbiItem } from "viem";
 import { base } from "viem/chains";
 import { getPositions, getLastRuns } from "@/lib/agent/memory";
 import { listAgentsForWallet } from "@/lib/agent/agents";
 import { getAgentStats } from "@/lib/agent/stats";
 import { getTokenPricesUsd } from "@/lib/prices/dexscreener";
+import { getUserProtocolBalance } from "@/lib/web3/cloveAutoDeposit";
 
 /**
  * GET /api/portfolio?wallet=0x...
@@ -37,9 +38,43 @@ const ERC20 = [{
   name: "balanceOf", type: "function", stateMutability: "view",
   inputs: [{ name: "a", type: "address" }], outputs: [{ type: "uint256" }],
 }] as const;
+const ERC20_META = parseAbi([
+  "function symbol() view returns (string)",
+  "function decimals() view returns (uint8)",
+]);
+const TRANSFER_EVENT = parseAbiItem("event Transfer(address indexed from, address indexed to, uint256 value)");
 
 // Approx 1Shot public-relayer fee per executed tx (USDC) — seen in execution logs.
 const ONESHOT_FEE_USDC = 0.012;
+
+/**
+ * PART A — discover tokens the wallet ACTUALLY received (copy-trade buys etc.),
+ * not just a hardcoded list. Reads recent inbound ERC-20 Transfer logs (to ==
+ * wallet) and returns the token contracts, with symbol + decimals. This is what
+ * makes a VVV/cbBTC copy show up in the portfolio instead of $0.
+ */
+async function discoverHeldTokens(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  pub: any,
+  wallet: `0x${string}`,
+  knownLower: Set<string>,
+): Promise<{ symbol: string; address: `0x${string}`; decimals: number }[]> {
+  try {
+    const latest = await pub.getBlockNumber();
+    const span   = 100_000n;                 // ~2-3 days on Base; bounded for public RPC
+    const from   = latest > span ? latest - span : 0n;
+    const logs = await pub.getLogs({ fromBlock: from, toBlock: latest, event: TRANSFER_EVENT, args: { to: wallet } }) as Array<{ address: string }>;
+    const tokens = [...new Set(logs.map(l => l.address.toLowerCase()))].filter(a => !knownLower.has(a)).slice(0, 20);
+    const out: { symbol: string; address: `0x${string}`; decimals: number }[] = [];
+    for (const addr of tokens) {
+      let symbol = "TOKEN", decimals = 18;
+      try { symbol   = await pub.readContract({ address: addr, abi: ERC20_META, functionName: "symbol" })   as string; } catch { /* */ }
+      try { decimals = await pub.readContract({ address: addr, abi: ERC20_META, functionName: "decimals" }) as number; } catch { /* */ }
+      out.push({ symbol, address: addr as `0x${string}`, decimals });
+    }
+    return out;
+  } catch { return []; }
+}
 
 export async function GET(request: NextRequest) {
   const wallet = request.nextUrl.searchParams.get("wallet");
@@ -48,9 +83,16 @@ export async function GET(request: NextRequest) {
   const rpc = process.env.BASE_RPC ?? "https://mainnet.base.org";
   const pub = createPublicClient({ chain: base, transport: http(rpc) });
 
-  // ── 1. On-chain balances (parallel) ────────────────────────────────────────
+  // ── 1. Token universe = curated list + tokens the wallet actually received ──
+  // (Part A) Discovery makes copy-trade buys (VVV, cbBTC, …) show up instead of $0.
+  const known = new Set(TOKENS.map(t => t.address.toLowerCase()));
+  const discovered = await discoverHeldTokens(pub, wallet as `0x${string}`, known);
+  const universe: { symbol: string; address: `0x${string}`; decimals: number; stable?: boolean }[] =
+    [...TOKENS, ...discovered];
+
+  // ── On-chain balances (parallel) ────────────────────────────────────────────
   const rawBalances = await Promise.all(
-    TOKENS.map(async (t) => {
+    universe.map(async (t) => {
       try {
         const bal = await pub.readContract({
           address: t.address, abi: ERC20, functionName: "balanceOf", args: [wallet as `0x${string}`],
@@ -61,8 +103,8 @@ export async function GET(request: NextRequest) {
   );
 
   // ── 2. Prices for non-stable tokens (stables pinned to $1) ──────────────────
-  const priced = await getTokenPricesUsd(TOKENS.filter(t => !t.stable).map(t => t.address));
-  const holdings = TOKENS.map((t, i) => {
+  const priced = await getTokenPricesUsd(universe.filter(t => !t.stable).map(t => t.address));
+  const holdings = universe.map((t, i) => {
     const balance = rawBalances[i];
     const price = t.stable ? 1 : (priced[t.address.toLowerCase()] ?? 0);
     return {
@@ -101,6 +143,34 @@ export async function GET(request: NextRequest) {
     }));
   }
   const deployedUsd = effectivePositions.reduce((s, p) => s + (Number.parseFloat(p.amount) || 0), 0);
+
+  // ── PART B: AUDITOR — claimed (DB) vs actual (on-chain) ─────────────────────
+  // For lending positions (morpho/aave) read the REAL withdrawable balance from
+  // the vault and compare to what the run history claims. Catches a silently
+  // failed deposit, an over-report, or a hallucinated run — every number on the
+  // dashboard becomes provable, not "the agent said so".
+  const audit = await Promise.all(
+    effectivePositions
+      .filter(p => /morpho|aave/i.test(p.protocol))
+      .map(async (p) => {
+        const proto = p.protocol.toLowerCase().includes("aave") ? "aave" : "morpho";
+        let actualUsdc = 0;
+        try {
+          const atoms = await getUserProtocolBalance(wallet as `0x${string}`, proto);
+          actualUsdc = Number(atoms) / 1e6;
+        } catch { /* read failed — leave 0 */ }
+        const claimedUsdc = Number.parseFloat(p.amount) || 0;
+        const drift = +(actualUsdc - claimedUsdc).toFixed(4);
+        return {
+          protocol: p.protocol,
+          claimedUsdc: +claimedUsdc.toFixed(4),
+          actualUsdc:  +actualUsdc.toFixed(4),
+          drift,
+          // Allow a tiny tolerance for yield accrual / rounding; flag real gaps.
+          ok: Math.abs(drift) <= Math.max(0.01, claimedUsdc * 0.05),
+        };
+      }),
+  );
   // Estimated unrealized P/L: value of everything that isn't idle USDC, vs the
   // capital deployed into it. Approximate (no per-token cost basis stored), labelled as such.
   const estPnlUsd = (totalValueUsd - idleUsdcUsd) - deployedUsd;
@@ -161,6 +231,7 @@ export async function GET(request: NextRequest) {
     agents: agentCards,
     spend,
     performance,
+    audit,                          // Part B: claimed-vs-on-chain per lending position
     fetchedAt: Date.now(),
   });
 }

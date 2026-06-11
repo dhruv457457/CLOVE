@@ -20,9 +20,12 @@ export const maxDuration = 300;
  * without requiring a connected browser.
  */
 export async function GET(request: NextRequest) {
-  // Verify Vercel cron secret (only enforced in production)
+  // Verify the cron secret whenever one is configured — this endpoint triggers
+  // real on-chain spends, so on ANY public host (Vercel, Railway, …) it must not
+  // be openly callable. The old check only enforced auth on Vercel, which left
+  // a public Railway deployment wide open.
   const authHeader = request.headers.get("authorization");
-  if (process.env.VERCEL && authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
+  if (process.env.CRON_SECRET && authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 

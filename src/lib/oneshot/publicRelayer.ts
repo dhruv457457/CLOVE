@@ -31,17 +31,12 @@ import { TOKENS, CHAIN } from "@/lib/protocols/addresses";
 const RELAYER_URL        = "https://relayer.1shotapi.com/relayers";
 const FEE_COLLECTOR      = "0xE936e8FAf4A5655469182A49a505055B71C17604" as `0x${string}`;
 const BASE_CHAIN_ID      = 8453;
-const POLYGON_CHAIN_ID   = 137;
 
-/** Per-chain relayer config. targetAddress + fee token differ per chain. */
+/** Per-chain relayer config. CLOVE is Base-only (8453). */
 const RELAYER_CHAINS: Record<number, { target: `0x${string}`; usdc: `0x${string}` }> = {
   [BASE_CHAIN_ID]: {
     target: "0x26a529124f0bbf9af9d8f9f84a43efe47cf1199a",
     usdc:   TOKENS.USDC[CHAIN.BASE] as `0x${string}`,
-  },
-  [POLYGON_CHAIN_ID]: {
-    target: "0x38663d5e9d7b930bea883d27ea13e731242865fa",
-    usdc:   "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359", // native USDC on Polygon
   },
 };
 
@@ -85,6 +80,20 @@ async function rpc(method: string, params: unknown, id = 1): Promise<unknown> {
   const json = await res.json() as { result?: unknown; error?: { message: string; data?: unknown } };
   if (json.error) throw new Error(`Relayer error [${method}]: ${json.error.message} ${JSON.stringify(json.error.data ?? "")}`);
   return json.result;
+}
+
+// ── Webhook nudge registry ──────────────────────────────────────────────────
+// taskId → a wake fn that an inbound relayer webhook calls to short-circuit the
+// poll sleep. The webhook payload is NEVER trusted as authoritative — waking just
+// triggers an immediate relayer_getStatus re-read. Works on an always-on host
+// (Railway); harmlessly unused when no PUBLIC_BASE_URL is set (we just poll).
+const taskWakers = new Map<string, () => void>();
+
+/** Called by /api/relay/webhook when the relayer pushes a status update. */
+export function nudgeRelayTask(taskId: string): boolean {
+  const wake = taskWakers.get(taskId);
+  if (wake) { wake(); return true; }
+  return false;
 }
 
 // ── Capability + fee fetching ──────────────────────────────────────────────────
@@ -154,7 +163,7 @@ export interface RelayExecutionParams {
   workExecutions?: RelayWorkExecution[];
   /** Human-readable memo (for debugging) */
   memo?: string;
-  /** Chain to execute on. 8453 = Base (default), 137 = Polygon (Polymarket). */
+  /** Chain to execute on. Base (8453) only. */
   chainId?: number;
   /**
    * Optional EIP-7702 authorizationList — upgrades an EOA to a smart account
@@ -248,10 +257,16 @@ export async function executeViaPublicRelayer(
   ];
 
   // ── 4. Submit to relayer ──────────────────────────────────────────────────
+  // destinationUrl lets the relayer PUSH status to us instead of (only) polling.
+  // Set PUBLIC_BASE_URL on an always-on host (Railway) to enable it — locally it
+  // stays unset and we just poll. The push is a *nudge* to re-check, never trusted
+  // as authoritative (we always re-read relayer_getStatus on wake).
+  const publicBase = process.env.PUBLIC_BASE_URL;
   const sendParams = {
     chainId: String(chainId),
     ...(feeData.context ? { context: feeData.context } : {}),
     ...(authorizationList && authorizationList.length > 0 ? { authorizationList } : {}),
+    ...(publicBase ? { destinationUrl: `${publicBase.replace(/\/$/, "")}/api/relay/webhook` } : {}),
     transactions: [{ permissionContext, executions }],
     memo,
   };
@@ -266,8 +281,9 @@ export async function executeViaPublicRelayer(
 
   console.log(`[publicRelayer] Submitted taskId=${taskId}, fee=${feeUsdc.toFixed(4)} USDC`);
 
-  // ── 6. Poll for confirmation ──────────────────────────────────────────────
-  // Poll up to 90s (Base L2 = ~2s block time, usually confirms in 5-15s)
+  // ── 6. Wait for confirmation — webhook nudge races polling ─────────────────
+  // Poll up to 90s (Base L2 = ~2s block time, usually confirms in 5-15s). If a
+  // webhook arrives, it wakes the loop early to re-poll the authoritative status.
   const deadline    = Date.now() + 90_000;
   const intervalMs  = 3_000;
   let txHash: string | undefined;
@@ -275,7 +291,11 @@ export async function executeViaPublicRelayer(
   let failMessage: string | undefined;
 
   while (Date.now() < deadline) {
-    await new Promise(r => setTimeout(r, intervalMs));
+    // Sleep up to intervalMs, but wake immediately if the relayer pushes a webhook.
+    await new Promise<void>(resolve => {
+      const timer = setTimeout(() => { taskWakers.delete(taskId); resolve(); }, intervalMs);
+      taskWakers.set(taskId, () => { clearTimeout(timer); taskWakers.delete(taskId); resolve(); });
+    });
     try {
       const st = await getRelayStatus(taskId);
       // 100=Pending, 110=Submitted, 200=Confirmed, 400=Rejected, 500=Reverted
@@ -299,6 +319,7 @@ export async function executeViaPublicRelayer(
       }
     } catch { /* transient polling error — keep trying */ }
   }
+  taskWakers.delete(taskId);   // no dangling waker after we stop waiting
 
   return {
     taskId,

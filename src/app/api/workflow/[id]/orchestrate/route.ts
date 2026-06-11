@@ -1,7 +1,7 @@
 import { NextRequest } from "next/server";
 import OpenAI from "openai";
 import { getWorkflow } from "@/lib/agent/workflows";
-import { getAgent, agentOnChainAddress, updateAgent } from "@/lib/agent/agents";
+import { getAgent, agentOnChainAddress } from "@/lib/agent/agents";
 import { getVeniceClient, VENICE_MODELS } from "@/lib/venice/client";
 import { executeTool, type ExecutorContext } from "@/lib/agent/tools";
 import {
@@ -77,6 +77,20 @@ async function runAgentPhase(opts: {
       break;
     }
 
+    // LIVE THINKING — reasoning text alongside tool calls was discarded before;
+    // stream it so the team timeline shows each agent's actual deliberation.
+    const thinking = typeof msg.content === "string" ? msg.content.trim() : "";
+    if (thinking) {
+      opts.send("thought", {
+        id:      generateThoughtId(),
+        runId:   opts.runId,
+        agentId: opts.agentId,
+        agent:   opts.agentName,
+        role:    opts.agentRole,
+        content: thinking.slice(0, 280),
+      });
+    }
+
     const toolMsgs: OpenAI.Chat.ChatCompletionToolMessageParam[] = [];
 
     for (const tc of msg.tool_calls) {
@@ -138,63 +152,34 @@ async function liveRedelegate(
   if (!childAgent) return parentContext;
   if (!parentContext || parentContext === "0xdemo" || parentContext.length < 40) return "0xdemo";
 
-  const apiKey    = process.env.ONESHOT_API_KEY;
-  const apiSecret = process.env.ONESHOT_API_SECRET;
-  const walletId  = process.env.ONESHOT_WALLET_ID;
-  if (!apiKey || !apiSecret || !walletId) {
-    send("redelegation-skipped", { reason: "1Shot not configured — using parent context" });
-    return parentContext;
-  }
+  // Per 1Shot guidance: build delegations on OUR side (smart-accounts-kit) with
+  // the final hop to the public relayer's target — never the dev-platform
+  // redelegate endpoint (that's for running your own server-wallet pool). Each
+  // worker's scoped, relayer-redeemable chain is already built at agent-creation
+  // time (from-answers → buildRedeemableWorkerChain) and stored as its
+  // delegationContext. So "redelegation" here is simply handing the child its own
+  // scoped chain — no API call, no dead endpoint.
+  const childCtx = childAgent.delegationContext;
+  const isScoped =
+    typeof childCtx === "string" &&
+    childCtx.startsWith("0x") &&
+    childCtx.length > 40 &&
+    childCtx !== "0xdemo" &&
+    childCtx !== "0xresearch-only";
 
-  try {
-    const childAddress = await agentOnChainAddress(childAgent);
-
-    // Get 1Shot token
-    const tokenRes = await fetch("https://api.1shotapi.com/v0/token", {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({ grant_type: "client_credentials", client_id: apiKey, client_secret: apiSecret }),
-      signal: AbortSignal.timeout(8000),
-    });
-    if (!tokenRes.ok) throw new Error(`1Shot token failed: ${tokenRes.status}`);
-    const { access_token } = await tokenRes.json() as { access_token: string };
-
-    // Redelegate
-    const reRes = await fetch(
-      `https://api.1shotapi.com/v0/wallets/${walletId}/redelegate-with-delegation-data`,
-      {
-        method: "POST",
-        headers: { Authorization: `Bearer ${access_token}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ delegationData: parentContext, delegateAddress: childAddress }),
-        signal: AbortSignal.timeout(15000),
-      }
-    );
-    if (!reRes.ok) throw new Error(`1Shot redelegate failed: ${reRes.status} ${await reRes.text()}`);
-    const result = await reRes.json() as { parent: string; redelegation: string };
-
-    const chain = [JSON.parse(result.parent), JSON.parse(result.redelegation)];
-    const newCtx = "0x" + Buffer.from(JSON.stringify(chain)).toString("hex");
-
-    // Update agent's delegationContext in DB with the fresh runtime context
-    await updateAgent(childAgent.id, {
-      delegationContext:  newCtx,
-      delegationStatus:   "active",
-    });
-
-    // 'for' is set by the caller via the redelegating event; pass contextHash for frontend
+  if (isScoped) {
     send("redelegation-complete", {
       to:          childAgent.name,
-      address:     childAddress,
-      contextHash: newCtx.slice(0, 18) + "…",
+      address:     await agentOnChainAddress(childAgent),
+      contextHash: childCtx!.slice(0, 18) + "…",
     });
-
-    return newCtx;
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    console.warn("[orchestrate] live redelegate failed:", msg);
-    send("redelegation-failed", { reason: msg, fallback: "using parent context" });
-    return parentContext;
+    return childCtx!;
   }
+
+  // No scoped chain on the child (legacy/relayer-grant team) — pass the parent
+  // context through so the spender stays executable.
+  send("redelegation-skipped", { reason: "using parent context (no scoped child chain)" });
+  return parentContext;
 }
 
 // ── Extract intelligence from checkYields result ───────────────────────────────
@@ -304,6 +289,8 @@ function extractDecision(
       // Only approve if the agent explicitly approved AND risk isn't HIGH.
       approved:   d.approved === true && riskLevel !== "HIGH" && action !== "hold",
       riskLevel,
+      // Sentinel: explicit demand to revoke the executor's delegation on-chain.
+      revoke:     d.revoke === true,
     };
   } catch { /* fall through to a safe non-executing decision */ }
 
@@ -446,6 +433,24 @@ export async function POST(
         workflow:  wf.name,
         agents:    [scout.name, riskMonitor.name, executor.name],
       });
+
+      // ── AUTO-ALLOCATION — Fund Manager re-splits the budget each run ────────
+      // Previously a manual "⚖️ Allocate budget" button; now every team run
+      // starts with Venice reading live yields and re-weighting each
+      // per-protocol executor's on-chain cap (ERC20TransferAmountEnforcer).
+      // Single-executor and copy-desk teams 400 here — that's a clean no-op.
+      try {
+        const allocRes = await fetch(`${baseUrl}/api/workflow/${workflowId}/allocate-budget`, {
+          method:  "POST",
+          headers: { "Content-Type": "application/json" },
+          body:    JSON.stringify({ walletAddress }),
+          signal:  AbortSignal.timeout(45000),
+        });
+        if (allocRes.ok) {
+          const alloc = await allocRes.json() as { reasoning?: string; source?: string; allocations?: unknown[] };
+          send("allocation", { reasoning: alloc.reasoning, source: alloc.source, allocations: alloc.allocations });
+        }
+      } catch { /* allocation is best-effort — never blocks the run */ }
 
       let fullPacket: AgentHandoffPacket = packet;
 
@@ -614,10 +619,19 @@ Return JSON: { "action": "deposit"|"hold"|"rebalance", "protocol": "...", "amoun
         const { toolResults: riskResults, finalText: riskFinalText } = await runAgentPhase({
           agentName:    riskMonitor.name,
           agentRole:    "risk",
-          systemPrompt: `You are ${riskMonitor.name}, a risk evaluation agent.
+          systemPrompt: `You are ${riskMonitor.name}, a risk evaluation agent — a SENTINEL with real powers.
 Scout has already fetched live intelligence — do NOT re-fetch it.
 Use checkRisk if needed to validate current market conditions.
-Then output a JSON decision: { action, protocol, amount, confidence, reasoning, approved, riskLevel }`,
+
+Your three powers (all enforced by the orchestrator, not just advisory):
+1. VETO   — set approved=false (or riskLevel HIGH): the trade does not happen.
+2. SHRINK — if riskLevel is MEDIUM and you still approve, the position is automatically halved.
+3. REVOKE — if you find evidence the target is a SCAM/HONEYPOT or the signal looks like manipulation,
+   set "revoke": true. The executor's on-chain delegation will be revoked via
+   DelegationManager.disableDelegation — it physically loses spending authority. Use this
+   only on strong evidence; it takes a human re-grant to restore.
+
+Then output a JSON decision: { action, protocol, amount, confidence, reasoning, approved, riskLevel, revoke }`,
           userMessage: riskUserMessage,
           tools:   riskTools,
           ctx:     riskCtx,
@@ -627,6 +641,35 @@ Then output a JSON decision: { action, protocol, amount, confidence, reasoning, 
         });
 
         const decision = extractDecision(riskFinalText, riskResults);
+
+        // ── SENTINEL ENFORCEMENT — the Risk Monitor's powers are real ─────────
+        // SHRINK: MEDIUM risk + approved → halve the position deterministically.
+        if (decision.riskLevel === "MEDIUM" && decision.approved && decision.amount) {
+          const orig = Number.parseFloat(decision.amount);
+          if (Number.isFinite(orig) && orig > 0) {
+            decision.shrunkFrom = decision.amount;
+            decision.amount     = (orig / 2).toFixed(4);
+            send("sentinel-shrink", {
+              from: decision.shrunkFrom, to: decision.amount,
+              reason: "MEDIUM risk — Sentinel halved the position before execution",
+            });
+          }
+        }
+        // REVOKE: scam/honeypot evidence → pull the executor's on-chain keys.
+        // DelegationManager.disableDelegation — the worker physically loses
+        // spending authority until a human re-grants. Not just a veto.
+        if (decision.revoke) {
+          send("sentinel-revoking", { executor: executor.name, reason: decision.reasoning.slice(0, 160) });
+          try {
+            const rres  = await fetch(`${baseUrl}/api/agent/${executor.id}/revoke`, { method: "POST" });
+            const rdata = await rres.json() as { ok?: boolean; via?: string; txHash?: string | null };
+            send("sentinel-revoked", { executor: executor.name, via: rdata.via, txHash: rdata.txHash ?? null });
+          } catch (e) {
+            send("sentinel-revoke-failed", { error: e instanceof Error ? e.message : String(e) });
+          }
+          decision.approved = false;   // a revoked executor must never execute
+        }
+
         await updateHandoffPacket(packet.id, { decision, phase: "redelegating-executor" });
         fullPacket = { ...fullPacket, decision };
 
@@ -641,7 +684,11 @@ Then output a JSON decision: { action, protocol, amount, confidence, reasoning, 
         });
 
         if (!decision.approved || decision.action === "hold") {
-          send("execution-skipped", { reason: `Risk Monitor decided to ${decision.action}: ${decision.reasoning.slice(0, 120)}` });
+          send("execution-skipped", {
+            reason: decision.revoke
+              ? `SENTINEL REVOKED the executor's delegation (scam/manipulation evidence): ${decision.reasoning.slice(0, 120)}`
+              : `Risk Monitor decided to ${decision.action}: ${decision.reasoning.slice(0, 120)}`,
+          });
           await updateHandoffPacket(packet.id, {
             phase:     "complete",
             completedAt: new Date(),

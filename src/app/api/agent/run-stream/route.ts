@@ -173,6 +173,10 @@ export async function POST(request: NextRequest) {
           budgetUsedUsdc:     agent.budgetUsedUsdc,
           chainId:            agent.chainId,
           typeConfig:         agent.typeConfig,
+          // Copy-desk workers carry a root-grant fallback for relayer rejection
+          // of their scoped multi-hop chain (the swap still lands; cap then
+          // enforced off-chain by the budget guard).
+          fallbackPermissionsContext: agent.rootFallbackContext,
         };
 
         const allToolResults: ToolCallResult[] = [];
@@ -329,9 +333,17 @@ export async function POST(request: NextRequest) {
 
             // 3. Act deterministically — or record exactly why we can't.
             if (!copyAddr) {
+              // discoverWhales explains its own selection outcome (all tokens
+              // already held / tier liquidity rules / no address) — prefer that.
+              let discoverReason: string | undefined;
+              for (const r of allToolResults) {
+                if (r.tool === "discoverWhales") {
+                  try { discoverReason = (JSON.parse(r.result) as { instruction?: string }).instruction; } catch { /**/ }
+                }
+              }
               holdReason = hasWallets
                 ? "Tracked wallets made no qualifying buys in the lookback window — nothing to copy."
-                : "No converged token carried a usable contract address (no liquidity match) — nothing safe to copy.";
+                : (discoverReason ?? "No converged token carried a usable contract address — nothing safe to copy.");
             } else {
               const budgetNum = Number(agent.budgetUsdc) || 1;
               const ratio = (agent.typeConfig as { copyRules?: { copyRatio?: number } } | undefined)?.copyRules?.copyRatio;
@@ -688,6 +700,16 @@ Once the subgoal is done, output a one-line summary as plain text (no tool call)
     const msg = res.choices[0]?.message;
     if (!msg) break;
     messages.push(msg);
+
+    // LIVE THINKING — the model's reasoning text was previously discarded.
+    // Surfacing it as a node is what makes the canvas feel like watching the
+    // agent think, not just watching tool calls fire.
+    const thinking = typeof msg.content === "string" ? msg.content.trim() : "";
+    if (thinking) {
+      await emit("plan", { observation: thinking.slice(0, 320) }, parentId, { x: cx - 220, y: cy });
+      cy += 80;
+    }
+
     if (!msg.tool_calls?.length) break;
 
     const toolResults: OpenAI.Chat.ChatCompletionToolMessageParam[] = [];

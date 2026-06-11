@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createAgent, setDelegation, type MediaPolicy, type AgentType } from "@/lib/agent/agents";
+import { createAgent, setDelegation, updateAgent, type MediaPolicy, type AgentType } from "@/lib/agent/agents";
 import { createWorkflow, addAgentToWorkflow, bindPermissionToWorkflow } from "@/lib/agent/workflows";
-import { getAgentTypeDef, buildTypeSystemPrompt, inferAgentType } from "@/lib/agent/agentTypes";
+import { getAgentTypeDef, buildTypeSystemPrompt, inferAgentType, COPY_TIER_LIQUIDITY_BOUNDARY_USD } from "@/lib/agent/agentTypes";
 
 /**
  * POST { prompt, walletAddress, answers, permissionsContext?, delegationManager? }
@@ -352,6 +352,111 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ agents: [agent], workflow, wired: false });
   }
 
+  // ── COPY DESK — lean 3-agent topology (Fund Manager + 2 risk-tiered copiers) ──
+  // Copy-trading needs no scout→analyzer→risk fan-out: the converged signal and
+  // the tier liquidity filter both live inside each copier's own run loop. So a
+  // copy team is exactly: Fund Manager (holds the grant, splits 70/30) →
+  // Conservative Copier (deep-liquidity blue chips) + Aggressive Copier (small
+  // caps), each with a real on-chain ERC20TransferAmountEnforcer cap AND a root
+  // fallback so a relayer that rejects the multi-hop chain never kills execution.
+  if (isMulti && agentType === "copy-trader") {
+    const baseCfg   = buildTypeConfig("copy-trader", answers, prompt);
+    const budgetNum = Number(budget);
+    const consCap   = Number((budgetNum * 0.7).toFixed(4));
+    const aggrCap   = Number((budgetNum - consCap).toFixed(4));
+    const tierLiqM  = COPY_TIER_LIQUIDITY_BOUNDARY_USD / 1e6;
+
+    // Fund Manager — team root, holds the user's grant.
+    const fundManager = await createAgent({
+      walletAddress,
+      name: "Fund Manager",
+      goal:
+        `You are the Fund Manager of a copy-trading desk. You hold the user's capped ERC-7715 budget ` +
+        `(${budget} USDC) and split it 70/30 into two on-chain-enforced sub-budgets: a Conservative Copier ` +
+        `(deep-liquidity blue chips) and an Aggressive Copier (smaller caps). Each copier can only spend ` +
+        `within the cap you grant it — overspend reverts on-chain.`,
+      budgetUsdc: budget, mediaPolicy: "off",
+      position: { x: 60, y: 140 }, workflowId: workflow.id,
+      agentType, typeConfig: { role: "fund-manager" },
+    });
+    await addAgentToWorkflow(workflow.id, fundManager.id);
+    await setDelegation(fundManager.id, {
+      parentAgentId: null,
+      delegationContext:        effectivePermContext!,
+      delegationHash:           "0xpending",
+      delegationManagerAddress: effectiveDelegationManager!,
+      delegationCap:            budget,
+    });
+
+    // Scoped, on-chain-capped chain for a copier — falls back to the root grant
+    // (so it stays executable) when the grant isn't a redelegatable FM grant or
+    // chain assembly fails.
+    const tierProtocols = ["uniswap", "aerodrome"];
+    const copierContext = async (childId: string, cap: number): Promise<{ context: string; hash: string }> => {
+      if (isFundManagerGrant) {
+        try {
+          const { buildRedeemableWorkerChain } = await import("@/lib/web3/subDelegation");
+          const chain = await buildRedeemableWorkerChain(effectivePermContext!, childId, tierProtocols, cap, typeDef.chainId);
+          return { context: chain.context, hash: chain.scopedHash };
+        } catch (e) {
+          console.warn("[from-answers] copier chain build failed — root fallback:", e instanceof Error ? e.message : e);
+        }
+      }
+      return { context: effectivePermContext!, hash: "0xpending" };
+    };
+
+    const tierDefs = [
+      {
+        name: "Conservative Copier", cap: consCap,
+        cfg:  { ...baseCfg, copyTier: "conservative", minLiquidityUsd: COPY_TIER_LIQUIDITY_BOUNDARY_USD },
+        goal: `${prompt.trim()} You are the CONSERVATIVE side of the copy desk: mirror converged smart-money buys ONLY ` +
+              `into deep-liquidity blue chips (pool liquidity ≥ $${tierLiqM}M — cbBTC/WETH class). On-chain cap ${consCap} ` +
+              `USDC; overspend reverts. ${scheduleClause} ${notify.includes("Telegram message") ? "Report via Telegram." : ""}`,
+      },
+      {
+        name: "Aggressive Copier", cap: aggrCap,
+        cfg:  { ...baseCfg, copyTier: "aggressive", maxLiquidityUsd: COPY_TIER_LIQUIDITY_BOUNDARY_USD },
+        goal: `${prompt.trim()} You are the AGGRESSIVE side of the copy desk: mirror converged smart-money buys into ` +
+              `smaller/mid-cap tokens (pool liquidity under $${tierLiqM}M) — bigger upside, bigger risk. On-chain cap ${aggrCap} ` +
+              `USDC; overspend reverts. ${scheduleClause} ${notify.includes("Telegram message") ? "Report via Telegram." : ""}`,
+      },
+    ];
+
+    const copiers: Awaited<ReturnType<typeof createAgent>>[] = [];
+    for (let i = 0; i < tierDefs.length; i++) {
+      const t = tierDefs[i];
+      const copier = await createAgent({
+        walletAddress, name: t.name, goal: t.goal,
+        budgetUsdc: String(t.cap),
+        scheduleIntervalMs,            // both tiers run on the schedule (cron runs them serially)
+        mediaPolicy: i === 0 ? mediaPolicy : "off",
+        position: { x: 460, y: 40 + i * 200 },
+        workflowId: workflow.id, agentType,
+        typeConfig: t.cfg,
+      });
+      await addAgentToWorkflow(workflow.id, copier.id);
+      const ctx = await copierContext(copier.id, t.cap);
+      await setDelegation(copier.id, {
+        parentAgentId:            fundManager.id,
+        delegationContext:        ctx.context,
+        delegationHash:           ctx.hash,
+        delegationManagerAddress: effectiveDelegationManager!,
+        delegationCap:            String(t.cap),
+      });
+      // Root-grant fallback for redemption-time relayer rejection of the scoped chain.
+      if (ctx.context !== effectivePermContext) {
+        await updateAgent(copier.id, { rootFallbackContext: effectivePermContext });
+      }
+      copiers.push(copier);
+    }
+
+    return NextResponse.json({
+      agents: [fundManager, ...copiers],
+      workflow, wired: true,
+      chain: "Fund Manager → Conservative Copier (70%) + Aggressive Copier (30%)",
+    });
+  }
+
   // ── Multi-agent team — generalized scout fan-out ───────────────────────────
   // Topology:   [Scout × N]  →  Convergence Analyzer  →  Risk Monitor  →  Executor
   //
@@ -633,44 +738,52 @@ export async function POST(request: NextRequest) {
   //    executor PER PROTOCOL so the Fund Manager can split the budget across them
   //    with on-chain-enforced per-worker caps. Each starts at an equal split;
   //    POST /api/workflow/[id]/allocate-budget re-weights them via a Venice
-  //    decision (AI decides the split → the caveat enforces it). Copy-trader and
-  //    single-protocol teams keep one executor.
-  const perProtocol = agentType !== "copy-trader" && workerProtocols.length > 1;
-  const execProtos: (string | null)[] = perProtocol ? workerProtocols : [null];
-  const nExec = execProtos.length;
-  const initialCap = Number((Number(budget) / nExec).toFixed(4)); // equal split to start
+  //    decision (AI decides the split → the caveat enforces it). Single-protocol
+  //    teams keep one executor. (Copy-trader teams are handled by the lean
+  //    copy-desk branch above and never reach here.)
+  interface ExecUnit { name: string; goal: string; cap: number; protocols?: string[]; typeConfig?: Record<string, unknown> }
+  const perProtocol = workerProtocols.length > 1;
+  const budgetNum   = Number(budget);
+
+  const execUnits: ExecUnit[] = perProtocol
+    ? (() => {
+        const eqCap = Number((budgetNum / workerProtocols.length).toFixed(4));
+        return workerProtocols.map(proto => ({
+          name: `${proto.charAt(0).toUpperCase()}${proto.slice(1)} Executor`,
+          cap:  eqCap,
+          protocols: [proto],
+          typeConfig: { protocols: [proto] },
+          goal: `${prompt.trim()} Deposit USDC into ${proto} ONLY, within your on-chain cap of ${eqCap} USDC. ${scheduleClause} ${notify.includes("Telegram message") ? "Report via Telegram." : ""}`,
+        }));
+      })()
+    : [{ name: executorName, cap: budgetNum, goal: executorGoal }];
 
   const executors: Awaited<ReturnType<typeof createAgent>>[] = [];
-  for (let i = 0; i < nExec; i++) {
-    const proto = execProtos[i];
-    const cap   = perProtocol ? initialCap : Number(budget);
+  for (let i = 0; i < execUnits.length; i++) {
+    const unit = execUnits[i];
     const ex = await createAgent({
       walletAddress,
-      name:        proto ? `${proto.charAt(0).toUpperCase()}${proto.slice(1)} Executor` : executorName,
-      goal:        proto
-        ? `${prompt.trim()} Deposit USDC into ${proto} ONLY, within your on-chain cap of ${cap} USDC. ${scheduleClause} ${notify.includes("Telegram message") ? "Report via Telegram." : ""}`
-        : executorGoal,
-      budgetUsdc:  String(cap),
+      name:        unit.name,
+      goal:        unit.goal,
+      budgetUsdc:  String(unit.cap),
       scheduleIntervalMs: i === 0 ? scheduleIntervalMs : undefined,  // one drives the schedule
       workflowId:  workflow.id,
       mediaPolicy: i === 0 ? mediaPolicy : "off",
       position:    { x: 1320, y: SCOUT_Y0 + i * SCOUT_DY },
       agentType,
-      // Per-protocol yield executors carry their single protocol; copy-trade
-      // executors carry the tracked wallets + copy RULES so checkWhaleTrades /
-      // executeCopyTrade honour minTokenAmount + copyRatio in team mode too.
-      typeConfig:  proto ? { protocols: [proto] }
-        : agentType === "copy-trader" ? buildTypeConfig("copy-trader", answers, prompt)
-        : undefined,
+      typeConfig:  unit.typeConfig,
     });
     await addAgentToWorkflow(workflow.id, ex.id);
-    const exCtx = await buildSubContext(rmCtx.context, ex, proto ? { protocols: [proto], capUsdc: cap } : undefined);
+    const exCtx = await buildSubContext(
+      rmCtx.context, ex,
+      unit.protocols ? { protocols: unit.protocols, capUsdc: unit.cap } : undefined,
+    );
     await setDelegation(ex.id, {
       parentAgentId:            riskMonitor.id,
       delegationContext:        exCtx.context,
       delegationHash:           exCtx.hash,
       delegationManagerAddress: effectiveDelegationManager ?? "0x",
-      delegationCap:            String(cap),
+      delegationCap:            String(unit.cap),
     });
     executors.push(ex);
   }

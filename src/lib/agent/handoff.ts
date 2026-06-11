@@ -24,6 +24,11 @@ export interface DecisionPayload {
   reasoning:  string;
   approved:   boolean;
   riskLevel:  "LOW" | "MEDIUM" | "HIGH";
+  /** Sentinel: the Risk Monitor demands the executor's delegation be revoked
+   *  on-chain (scam/honeypot/compromise evidence) — not just a veto. */
+  revoke?:     boolean;
+  /** Sentinel: original amount before a MEDIUM-risk position shrink. */
+  shrunkFrom?: string;
 }
 
 /** Execution result produced by the Executor agent. */
