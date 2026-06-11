@@ -48,8 +48,6 @@ function buildTypeConfig(agentType: AgentType, answers: Answers, prompt: string)
       const copyRules = parseCopyRules(prompt, answers);
       return Object.keys(copyRules).length > 0 ? { wallets, copyRules } : { wallets };
     }
-    case "narrative":
-      return { focus: answers.focus ?? "Base ecosystem tokens" };
     case "rebalancer":
       return { protocols: answers.protocols ?? [] };
     default:
@@ -139,7 +137,7 @@ export async function POST(request: NextRequest) {
   // Explicit selection from the questionnaire wins; otherwise infer from prompt.
   // The questionnaire answer may be a slug ("polymarket") or a human label
   // ("🎲 Polymarket Agent") — normalise both through inferAgentType.
-  const VALID_TYPES: AgentType[] = ["yield", "copy-trader", "narrative", "rebalancer"];
+  const VALID_TYPES: AgentType[] = ["yield", "copy-trader", "rebalancer"];
   const rawType = String(answers.agentType ?? "").toLowerCase().trim();
   const agentType: AgentType =
       (VALID_TYPES.includes(rawType as AgentType) ? (rawType as AgentType) : undefined)

@@ -24,7 +24,7 @@ export interface Question {
 const SYSTEM = `You are an AI assistant helping configure an autonomous DeFi agent named CLOVE.
 
 A user typed a prompt describing what they want their agent to do. Your job:
-1. Reason about their intent (yield? copy-trade? narrative? rebalance? multi-agent?)
+1. Reason about their intent (yield? copy-trade? rebalance? multi-agent?)
 2. EXTRACT every config detail the user ALREADY stated in their prompt.
 3. Ask clarifying questions ONLY for the fields that are still MISSING or ambiguous.
 
@@ -41,13 +41,13 @@ Only emit a question when the value genuinely cannot be inferred. If the prompt 
 fully specified, return an EMPTY questions array.
 
 AGENT-TYPE-AWARE QUESTIONS (very important — do not ask irrelevant fields):
-- "protocols" applies ONLY to yield and rebalancer agents. For copy-trader and
-  narrative agents, NEVER ask protocols — they mirror/trade whatever token the
-  signal points to and route swaps through Uniswap/Aerodrome automatically. The
-  protocol field is ignored for these types, so asking it is pure noise.
-- For copy-trader and narrative agents, default to a SINGLE agent. Do NOT ask
-  orchestration unless the user explicitly hinted at a team; if they didn't,
-  put "orchestration": "Single agent" in "prefilled" and skip the question.
+- "protocols" applies ONLY to yield and rebalancer agents. For copy-trader
+  agents, NEVER ask protocols — they mirror whatever token the signal points to
+  and route swaps through Uniswap/Aerodrome automatically. The protocol field is
+  ignored for copy-traders, so asking it is pure noise.
+- For copy-trader agents, default to a SINGLE agent unless the user explicitly
+  hinted at a team/desk; if they didn't, put "orchestration": "Single agent" in
+  "prefilled" and skip the question.
 
 Question types available:
 - "single": pick one option
@@ -61,7 +61,6 @@ agentType, protocols, risk, budget, schedule, notify, orchestration.
 CLOVE supports these agent archetypes (the "agentType" question MUST use exactly these option strings):
 - "yield" — Finds and farms the best DeFi yields on Base
 - "copy-trader" — Mirrors smart-money wallets when they converge (Base)
-- "narrative" — Catches social/narrative momentum early (Base)
 - "rebalancer" — Monitors real on-chain positions & rebalances to better yields (Base)
 
 ALSO return a "prefilled" object containing every field you DID extract from the prompt,
@@ -78,7 +77,7 @@ Return ONLY valid JSON — no prose:
       "label": "What kind of agent is this?",
       "hint": "Each archetype perceives a different real data source and acts on its own",
       "type": "single",
-      "options": ["yield", "copy-trader", "narrative", "rebalancer"]
+      "options": ["yield", "copy-trader", "rebalancer"]
     },
     {
       "id": "protocols",
@@ -167,7 +166,7 @@ function defaultQuestions(): Question[] {
       id: "agentType", label: "What kind of agent is this?",
       hint: "Each archetype perceives a different real data source and acts on its own",
       type: "single",
-      options: ["yield", "copy-trader", "narrative", "rebalancer"],
+      options: ["yield", "copy-trader", "rebalancer"],
     },
     {
       id: "protocols", label: "Which protocols should the agent use?",

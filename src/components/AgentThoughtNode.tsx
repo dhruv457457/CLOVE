@@ -42,7 +42,6 @@ const TOOL: Record<string, { label: string; icon: React.ReactNode; tint: string 
   executeCopyTrade:      { label: "Mirroring smart money",    icon: <IconBolt />,   tint: "#9C8BFF" },
   checkRealYields:       { label: "Reading DeFiLlama yields", icon: <IconChart />,  tint: ACCENT },
   monitorPositions:      { label: "Reading positions",        icon: <IconChart />,  tint: TEXT2 },
-  checkNarratives:      { label: "Reading market narrative", icon: <IconNews />,   tint: "#F2B85C" },
   addThought:            { label: "Thinking",                 icon: <IconSpark />,  tint: TEXT2 },
   revisePlan:            { label: "Revising plan",            icon: <IconSwap />,   tint: PEND  },
 };
@@ -546,7 +545,6 @@ function IconBolt()    { return svg(<><path d="M13 2 4 14h7l-1 8 9-12h-7l1-8z" f
 function IconSwap()    { return svg(<><path d="M7 4 3 8l4 4M3 8h13M17 20l4-4-4-4M21 16H8" /></>); }
 function IconSend({ size = 14 }: { size?: number }) { return svg(<><path d="M22 2 11 13M22 2l-7 20-4-9-9-4 20-7z" /></>, size); }
 function IconWhale()   { return svg(<><path d="M3 12c4 4 14 4 18-1M3 12c0-3 3-5 6-4M21 7c0 3-1 4-1 4" /><circle cx="8" cy="9" r="0.5" fill="currentColor" /></>); }
-function IconNews()    { return svg(<><rect x="3" y="5" width="18" height="14" rx="2" /><path d="M7 9h6M7 13h10M7 17h7" /></>); }
 function IconSpark()   { return svg(<><path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2 2M16 16l2 2M18 6l-2 2M8 16l-2 2" /></>); }
 function IconQuote()   { return svg(<><path d="M7 8H5a2 2 0 0 0-2 2v3a2 2 0 0 0 2 2h2v-7zM17 8h-2a2 2 0 0 0-2 2v3a2 2 0 0 0 2 2h2V8z" /></>); }
 function IconImage()   { return svg(<><rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="9" cy="9" r="2" /><path d="m21 15-5-5L5 21" /></>); }

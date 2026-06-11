@@ -22,7 +22,7 @@ const KNOWN_PROTOCOLS = ["morpho", "aave", "aerodrome", "uniswap", "lido"];
 
 /** Resolve which protocol targets a worker may touch, from its type/config/goal. */
 function resolveProtocols(agent: Agent): string[] {
-  if (agent.agentType === "copy-trader" || agent.agentType === "narrative") {
+  if (agent.agentType === "copy-trader") {
     return ["uniswap", "aerodrome"]; // DEX swaps
   }
   // yield / rebalancer → explicit config, else parse the goal, else a safe default.

@@ -146,22 +146,6 @@ export const TOOL_DEFINITIONS: OpenAI.Chat.ChatCompletionTool[] = [
     },
   },
 
-  // â”€â”€ Narrative-momentum tools (Base) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-  {
-    type: "function",
-    function: {
-      name: "checkNarratives",
-      description:
-        "Scan X/Twitter and crypto news (via web search) for tokens/themes whose social mentions are growing. Returns RAW signals only â€” mention trend, rough mention volume, notable accounts, and any on-chain volume note. It deliberately does NOT tell you whether to buy or whether a narrative is early/late: YOU must judge that from the raw signals and record your reasoning with addThought.",
-      parameters: {
-        type: "object",
-        properties: {
-          focus: { type: "string", description: "Optional theme to bias the scan, e.g. 'AI agents', 'Base memecoins', 'RWA'" },
-        },
-      },
-    },
-  },
-
   // â”€â”€ Rebalancer tools (Base) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   {
     type: "function",
@@ -813,48 +797,6 @@ Return ONLY JSON: { "riskLevel": "LOW"|"MEDIUM"|"HIGH", "safeToExecute": true|fa
     }
   }
 
-  // â”€â”€ checkNarratives (Venice web search over X/news) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-  if (name === "checkNarratives") {
-    const focus = String(args.focus ?? (ctx.typeConfig?.focus ?? "Base ecosystem tokens"));
-    try {
-      const veniceRes = await fetch("https://api.venice.ai/api/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          "Content-Type":  "application/json",
-          "Authorization": `Bearer ${process.env.VENICE_API_KEY ?? ""}`,
-        },
-        body: JSON.stringify({
-          model: "llama-3.3-70b",
-          messages: [{
-            role: "user",
-            content: `You are a crypto data collector (NOT an analyst). Using web search, find 3-5 tokens/themes on Base or broader crypto whose social mentions (X/Twitter) are moving right now (focus: ${focus}).
-Report ONLY raw, observable signals. Do NOT decide whether anything is "early", "late", or a buy â€” that judgement is made by someone else.
-For each, report what you can actually observe: rough mention volume now vs ~6h/24h ago, a few notable accounts driving it, approximate market cap if known, and any on-chain volume figure you found (with its source).
-Return ONLY JSON: { "signals": [ { "token": "...", "theme": "...", "mentionTrend": "<e.g. ~5x in 6h / steady / cooling>", "approxMentions": "<rough count or 'unknown'>", "notableAccounts": ["@..."], "approxMarketCap": "<or 'unknown'>", "onchainVolumeNote": "<observed volume + source, or 'not found'>" } ] }`,
-          }],
-          venice_parameters: { enable_web_search: "on" },
-          response_format: { type: "json_object" },
-          temperature: 0.3,
-        }),
-        signal: AbortSignal.timeout(20000),
-      });
-      if (veniceRes.ok) {
-        const vData = await veniceRes.json();
-        const raw = vData.choices?.[0]?.message?.content ?? "{}";
-        const text = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/, "").trim();
-        const parsed = JSON.parse(text) as { signals?: unknown[]; narratives?: unknown[] };
-        const signals = Array.isArray(parsed.signals) ? parsed.signals
-                      : Array.isArray(parsed.narratives) ? parsed.narratives : [];
-        return { tool: name, args, result: JSON.stringify({
-          signals: signals.slice(0, 5),
-          focus,
-          instruction: "These are RAW signals only. YOU must now judge: is each narrative early or already saturated? Does on-chain volume confirm it or is it just CT noise? Record your verdict with addThought, then only buy the ones you judge early AND volume-confirmed.",
-          source: "venice-web-search",
-        })};
-      }
-    } catch { /* fall through */ }
-    return { tool: name, args, result: JSON.stringify({ signals: [], focus, source: "unavailable" }) };
-  }
 
   // â”€â”€ checkRealYields (DeFiLlama direct) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   if (name === "checkRealYields") {

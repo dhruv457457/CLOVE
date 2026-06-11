@@ -61,8 +61,12 @@ async function discoverHeldTokens(
 ): Promise<{ symbol: string; address: `0x${string}`; decimals: number }[]> {
   try {
     const latest = await pub.getBlockNumber();
-    const span   = 100_000n;                 // ~2-3 days on Base; bounded for public RPC
-    const from   = latest > span ? latest - span : 0n;
+    // Public Base RPCs cap getLogs ranges (~10k blocks). Match the proven bound
+    // from /api/whale/activity so this actually returns instead of erroring →
+    // [] (which would silently hide discovered tokens). ~10k blocks ≈ 5-6h; older
+    // copy positions are still covered by the curated list + run-derived positions.
+    const span = 9_000n;
+    const from = latest > span ? latest - span : 0n;
     const logs = await pub.getLogs({ fromBlock: from, toBlock: latest, event: TRANSFER_EVENT, args: { to: wallet } }) as Array<{ address: string }>;
     const tokens = [...new Set(logs.map(l => l.address.toLowerCase()))].filter(a => !knownLower.has(a)).slice(0, 20);
     const out: { symbol: string; address: `0x${string}`; decimals: number }[] = [];

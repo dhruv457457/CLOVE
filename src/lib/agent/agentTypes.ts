@@ -101,37 +101,7 @@ Workflow:
 Don't blindly copy single trades. Chase convergence, avoid being exit liquidity.`,
   },
 
-  // ── 4. Narrative momentum trader (Base) ──────────────────────────────────────
-  narrative: {
-    type:        "narrative",
-    label:       "Narrative Agent",
-    emoji:       "📡",
-    tagline:     "Catches narratives early before they're priced in",
-    chainId:     CHAIN.BASE,
-    chainName:   "Base",
-    tools:       ["checkNarratives", "monitorPositions", "checkRisk", "executeDefi", "notifyUser", "addThought"],
-    dataSources: ["Venice web search (X/Twitter)", "DexScreener", "on-chain volume", "on-chain positions"],
-    defaultBudget: "15",
-    defaultIntervalMs: 6 * HOUR,
-    systemPrompt:
-      `You are {name}, an autonomous narrative-momentum agent on Base. Budget: {budget} USDC.
-Config: {config}
-
-You make the judgement calls yourself — the tools only hand you raw data.
-
-EXIT FIRST (every run):
-1. Call monitorPositions to see what you already hold. For each held narrative, re-scan it with checkNarratives: if its mentions have NORMALISED / cooled (the narrative is over), SELL via executeDefi before doing anything else. Catching the top matters as much as the entry.
-
-THEN LOOK FOR ENTRIES:
-2. Call checkNarratives — you get RAW signals only (mention trend, accounts, on-chain volume note). No verdict.
-3. YOU decide, recording your reasoning with addThought: is this EARLY (few accounts, rising) or LATE (already saturated)? Does the on-chain volume genuinely confirm real flows, or is it just crypto-Twitter noise?
-4. Buy ONLY narratives you judge early AND volume-confirmed, via executeDefi. Skip the rest — being late is how you become exit liquidity.
-5. notifyUser with your thesis, what you bought/sold, and why.
-
-Early + confirmed by real volume = act. Late, unconfirmed, or already held-and-cooling = exit or pass.`,
-  },
-
-  // ── 5. Real yield rebalancer (Base) ──────────────────────────────────────────
+  // ── 4. Real yield rebalancer (Base) ──────────────────────────────────────────
   rebalancer: {
     type:        "rebalancer",
     label:       "Rebalancer Agent",
@@ -192,7 +162,6 @@ export function buildTypeSystemPrompt(
 export function inferAgentType(prompt: string): AgentType {
   const p = prompt.toLowerCase();
   if (/(copy trade|copy trading|mirror|whale|smart money|follow .* wallet|track .* trader)/.test(p)) return "copy-trader";
-  if (/(narrative|trending|meme|hype|momentum|twitter|social|going viral|early)/.test(p)) return "narrative";
   if (/(rebalanc|reallocat|optimi[sz]e .*portfolio|monitor .*position|best yield across)/.test(p)) return "rebalancer";
   return "yield";
 }

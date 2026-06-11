@@ -19,13 +19,11 @@ export type MediaPolicy = "off" | "milestones" | "daily" | "every-run";
  * Driven by the registry in src/lib/agent/agentTypes.ts (no hardcoded if-branches).
  *   - "yield"       : generic DeFi yield agent (the original behavior)
  *   - "copy-trader" : mirrors on-chain whale trades (Base)
- *   - "narrative"   : narrative-momentum trader, scans X for trending tokens
  *   - "rebalancer"  : real yield rebalancer hitting DeFiLlama / Morpho / Aave directly
  */
 export type AgentType =
   | "yield"
   | "copy-trader"
-  | "narrative"
   | "rebalancer";
 
 export interface Agent {

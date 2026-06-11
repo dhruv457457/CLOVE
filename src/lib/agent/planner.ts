@@ -14,7 +14,6 @@ const TOOL_DESCRIPTIONS: Record<string, string> = {
   notifyUser:             "send Telegram report (always include as the final subgoal)",
   checkWhaleTrades:       "read recent on-chain swaps of tracked smart-money wallets (Basescan)",
   executeCopyTrade:       "mirror a smart-money swap proportionally to your budget",
-  checkNarratives:        "find tokens/themes whose social mentions are spiking (Venice web search over X)",
   checkRealYields:        "fetch the best real yields right now directly from DeFiLlama",
   monitorPositions:       "read your current on-chain positions and their live APY",
 };
@@ -100,11 +99,6 @@ function planSystemPrompt(memoryPrompt: string, insights: AgentInsight[], agentT
 
   const rulesByType: Partial<Record<AgentType, string>> = {
     "copy-trader": copyTraderRules,
-    narrative:
-`1. Plan monitorPositions FIRST — exit cooling narratives you already hold via executeDefi before considering new buys.
-2. Then checkNarratives for raw signals; YOU judge early-vs-late and volume confirmation (record it with addThought).
-3. Plan executeDefi only for narratives you judge early AND volume-confirmed.
-4. Always end with notifyUser. Generate 2–4 subgoals maximum.`,
     rebalancer:
 `1. Start with monitorPositions, then checkRealYields (DeFiLlama — real APYs).
 2. Plan rebalance only when a current position underperforms the best alternative beyond the switching cost.
@@ -231,15 +225,6 @@ function fallbackPlan(agentType?: AgentType, hasWallets = false): Plan {
               { id: "s1", description: "Discover smart money and copy the strongest converged token", tools: ["discoverWhales", "executeCopyTrade", "notifyUser"] },
             ],
           };
-    case "narrative":
-      return {
-        reasoning: "Default plan: check held positions → exit cooling → scan → buy early → notify.",
-        subgoals: [
-          { id: "s1", description: "Review held narratives, exit any that have cooled", tools: ["monitorPositions", "executeDefi"] },
-          { id: "s2", description: "Scan raw narrative signals and judge them",         tools: ["checkNarratives", "addThought"] },
-          { id: "s3", description: "Buy early, volume-confirmed narratives, then report", tools: ["executeDefi", "notifyUser"] },
-        ],
-      };
     case "rebalancer":
       return {
         reasoning: "Default plan: read positions → compare real yields → rebalance → notify.",
