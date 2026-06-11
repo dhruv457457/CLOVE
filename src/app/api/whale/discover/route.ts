@@ -90,7 +90,7 @@ async function discoverViaDune(limit: number): Promise<DiscoveredWallet[] | null
 
 // ── Dune convergence — tokens 2+ top whales bought recently (the real signal) ──
 async function convergenceViaDune(): Promise<{
-  convergence: Array<{ target: string; walletCount: number; totalUsd?: number }>;
+  convergence: Array<{ target: string; token?: string; liquidityUsd?: number; walletCount: number; totalUsd?: number }>;
   trades: unknown[];
   ageMinutes: number | null;
 } | null> {
@@ -113,16 +113,46 @@ async function convergenceViaDune(): Promise<{
       ? Math.round((Date.now() - new Date(data.execution_ended_at).getTime()) / 60000)
       : null;
 
-    const convergence = rows.map(r => ({
-      target:      String(r.symbol ?? r.token ?? "?"),
-      walletCount: Number(r.whale_count ?? r.wallet_count ?? r.whales ?? 0),
-      totalUsd:    Number(r.total_usd ?? r.volume_usd ?? 0) || undefined,
-    })).filter(c => c.walletCount >= 2);
+    // Pull the token's CONTRACT ADDRESS out of the row so the copy-trade agent can
+    // mirror ANY converged token — not just the handful in the symbol registry.
+    // Prefer an explicit address column; else any 0x-address value in the row.
+    const addrOf = (r: Record<string, unknown>): string | undefined => {
+      const named = ["token_address", "contract_address", "tokenaddress", "address", "token"]
+        .map(want => Object.keys(r).find(k => k.toLowerCase() === want))
+        .find(Boolean);
+      const candidates = [named ? String(r[named]) : "", ...Object.values(r).map(v => String(v))];
+      // Skip the zero address — it's a null placeholder, not a copyable token.
+      const hit = candidates.find(v => /^0x[a-fA-F0-9]{40}$/.test(v) && !/^0x0+$/.test(v));
+      return hit ? hit.toLowerCase() : undefined;
+    };
 
-    // Synthesize a lightweight "trades" view for display/summaries.
+    const convergenceRaw = rows.map(r => {
+      const token = addrOf(r);
+      const sym   = r.symbol != null ? String(r.symbol) : undefined;
+      return {
+        target:      sym ?? token ?? String(r.token ?? "?"),
+        token,                                          // contract address (when the query provides one)
+        walletCount: Number(r.whale_count ?? r.wallet_count ?? r.whales ?? 0),
+        totalUsd:    Number(r.total_usd ?? r.volume_usd ?? 0) || undefined,
+      };
+    }).filter(c => c.walletCount >= 2);
+
+    // Dune convergence usually reports SYMBOLS only. Resolve each to its most-liquid
+    // Base contract address via DexScreener so the copy-trade agent can actually
+    // mirror it — and so we know it has a pool (no-liquidity tokens are dropped from
+    // being copyable). This is what makes discovery-mode copy EXECUTE, not just hold.
+    const { resolveSymbolToBaseToken } = await import("@/lib/prices/dexscreener");
+    const convergence = await Promise.all(convergenceRaw.slice(0, 8).map(async c => {
+      if (c.token && /^0x[a-f0-9]{40}$/.test(c.token)) return { ...c, liquidityUsd: undefined as number | undefined };
+      const resolved = await resolveSymbolToBaseToken(c.target);
+      return { ...c, token: resolved?.address ?? c.token, liquidityUsd: resolved?.liquidityUsd };
+    }));
+
+    // Synthesize a lightweight "trades" view for display/summaries — carry the
+    // resolved token address through so executeCopyTrade gets a real `tokenAddress`.
     const trades = convergence.slice(0, 10).map(c => ({
-      wallet: "multiple", action: "buy", symbol: c.target,
-      ageMinutes: 0, walletCount: c.walletCount, usd: c.totalUsd,
+      wallet: "multiple", action: "buy", symbol: c.target, token: c.token,
+      ageMinutes: 0, walletCount: c.walletCount, usd: c.totalUsd, liquidityUsd: c.liquidityUsd,
     }));
     return { convergence, trades, ageMinutes };
   } catch {

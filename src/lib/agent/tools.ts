@@ -131,15 +131,16 @@ export const TOOL_DEFINITIONS: OpenAI.Chat.ChatCompletionTool[] = [
     function: {
       name: "executeCopyTrade",
       description:
-        "Mirror a whale's trade by swapping into the same token, sized to your budget. Uses the user's ERC-7715 delegation. Call only after confirming a strong, fresh signal.",
+        "Mirror a whale's trade by swapping USDC into the SAME token they just bought, sized to your budget. Uses the user's ERC-7715 delegation. Call only after confirming a strong, fresh signal from checkWhaleTrades.",
       parameters: {
         type: "object",
-        required: ["protocol", "amount", "reasoning"],
+        required: ["protocol", "tokenAddress", "reasoning"],
         properties: {
-          protocol:  { type: "string", enum: ["uniswap", "aerodrome"], description: "DEX to route the copy trade through" },
-          tokenSymbol: { type: "string", description: "Token being copied, for the log" },
-          amount:    { type: "string", description: "USDC amount to deploy" },
-          reasoning: { type: "string", description: "Which wallets you're following and why" },
+          protocol:     { type: "string", enum: ["uniswap", "aerodrome"], description: "DEX to route the copy trade through" },
+          tokenAddress: { type: "string", description: "The token contract address the whale bought — copy this EXACT field from the checkWhaleTrades trade.token. This lets you copy ANY token." },
+          tokenSymbol:  { type: "string", description: "Token symbol, for the log" },
+          amount:       { type: "string", description: "USDC amount to deploy (omit to use the configured copyRatio × budget)" },
+          reasoning:    { type: "string", description: "Which wallet you're following and why" },
         },
       },
     },
@@ -570,16 +571,33 @@ Return ONLY JSON: { "riskLevel": "LOW"|"MEDIUM"|"HIGH", "safeToExecute": true|fa
         wallets?: string[];
         discovered?: Array<{ wallet: string; swaps: number; ethMoved: number; lastSeenMinutes: number }>;
         trades?: unknown[];
-        convergence?: Array<{ target: string; walletCount: number }>;
+        convergence?: Array<{ target: string; token?: string; liquidityUsd?: number; walletCount: number }>;
         note?: string;
       };
+      const convergence = data.convergence ?? [];
+      // Strongest converged token that carries a REAL contract address (symbols are
+      // resolved to liquid Base addresses upstream). This is what the agent copies
+      // via executeCopyTrade(tokenAddress=...). Rank by convergence (walletCount).
+      const topCopyable = convergence
+        .filter(c => typeof c.token === "string" && /^0x[a-fA-F0-9]{40}$/.test(c.token!) && !/^0x0+$/.test(c.token!))
+        .sort((a, b) => b.walletCount - a.walletCount)[0];
       return { tool: name, args, result: JSON.stringify({
         discoveredCount: data.wallets?.length ?? 0,
         wallets:         data.wallets ?? [],
         discovered:      data.discovered ?? [],
         tradeCount:      data.trades?.length ?? 0,
         trades:          (data.trades ?? []).slice(0, 15),
-        convergence:     data.convergence ?? [],
+        convergence,
+        // Tell the agent exactly what to copy. executeCopyTrade needs a 0x address;
+        // pass convergence[].token (NOT the symbol). If no token here has an
+        // address, the convergence source only gave symbols — copy is not possible
+        // for those; say so rather than guessing.
+        copyTarget: topCopyable
+          ? { tokenAddress: topCopyable.token, symbol: topCopyable.target, walletCount: topCopyable.walletCount }
+          : null,
+        instruction: topCopyable
+          ? `To copy, call executeCopyTrade with tokenAddress="${topCopyable.token}" (symbol ${topCopyable.target}, ${topCopyable.walletCount} wallets). Use the ADDRESS, not the symbol.`
+          : "No converged token included a contract address — cannot copy these by symbol alone. Report this and hold.",
         source:          "basescan",
         note:            data.note,
       })};
@@ -602,15 +620,21 @@ Return ONLY JSON: { "riskLevel": "LOW"|"MEDIUM"|"HIGH", "safeToExecute": true|fa
         signal: AbortSignal.timeout(15000),
       });
       const data = await res.json() as {
-        trades?: Array<{ wallet: string; action: string; symbol?: string; router?: string; ageMinutes: number; basescanUrl: string }>;
-        convergence?: Array<{ target: string; walletCount: number }>;
+        trades?: Array<{ wallet: string; symbol?: string; amount?: string; amountNum?: number; ageMinutes: number; basescanUrl: string }>;
+        convergence?: Array<{ target: string; token?: string; walletCount: number; totalAmount?: number }>;
         error?: string;
       };
+      // Apply the user's copy RULES (friend's-wallet mode): only surface buys that
+      // clear the minimum size, so the agent copies what the owner intended.
+      const rules = (ctx.typeConfig?.copyRules ?? {}) as { minTokenAmount?: number; copyRatio?: number };
+      const minAmt = Number(rules.minTokenAmount) || 0;
+      const trades = (data.trades ?? []).filter(t => (t.amountNum ?? 0) >= minAmt);
       return { tool: name, args, result: JSON.stringify({
-        tradeCount:  data.trades?.length ?? 0,
-        trades:      (data.trades ?? []).slice(0, 15),
+        tradeCount:  trades.length,
+        trades:      trades.slice(0, 15),       // each carries symbol + amount
         convergence: data.convergence ?? [],
-        source:      "basescan",
+        copyRules:   rules,                      // {minTokenAmount, copyRatio}
+        source:      "base-rpc",
         error:       data.error,
       })};
     } catch (e) {
@@ -621,48 +645,47 @@ Return ONLY JSON: { "riskLevel": "LOW"|"MEDIUM"|"HIGH", "safeToExecute": true|fa
   // â”€â”€ executeCopyTrade (thin wrapper over executeDefi swap) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // ── executeCopyTrade ────────────────────────────────────────────────────────
   if (name === "executeCopyTrade") {
-    const protocol    = String(args.protocol ?? "uniswap");
-    const amount      = String(args.amount ?? "0.1");
-    const tokenSymbol = String(args.tokenSymbol ?? "");
-    // BUG 1+6 fix: map well-known Base token symbols to contract addresses.
-    // Without this, every copy trade swaps USDC→WETH regardless of what the whale bought.
+    const protocol     = String(args.protocol ?? "uniswap");
+    // Normalize: the agent often copies the symbol straight off the board where
+    // it renders as "$cbBTC" — strip the $ and whitespace so registry lookup hits.
+    const tokenSymbol  = String(args.tokenSymbol ?? "").trim().replace(/^\$/, "");
+    const tokenAddrArg = String(args.tokenAddress ?? "").trim();
+    const rules = (ctx.typeConfig?.copyRules ?? {}) as { minTokenAmount?: number; copyRatio?: number };
+
+    // Symbol → address registry, used ONLY as a fallback. The preferred path is
+    // the token's contract address straight from checkWhaleTrades, so we can copy
+    // ANY token the whale bought — not just a hardcoded list.
     const TOKEN_ADDRESSES: Record<string, string> = {
-      WETH:   "0x4200000000000000000000000000000000000006",
-      ETH:    "0x4200000000000000000000000000000000000006",
-      AERO:   "0x940181a94A35A4569E4529A3CDfB74e38FD98631",
-      cbETH:  "0x2Ae3F1Ec7F1F5012CFEab0185bfc7aa3cf0DEc22",
-      cbBTC:  "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf",
-      DEGEN:  "0x4ed4E862860beD51a9570b96d89aF5E1B0Efefed",
-      BRETT:  "0x532f27101965dd16442E59d40670FaF5eBB142E4",
-      HIGHER: "0x0578d8A44db98B23BF096A382e016e29a5Ce0ffe",
-      USDT:   "0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2",
-      DAI:    "0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb",
+      WETH: "0x4200000000000000000000000000000000000006", ETH: "0x4200000000000000000000000000000000000006",
+      AERO: "0x940181a94A35A4569E4529A3CDfB74e38FD98631", cbETH: "0x2Ae3F1Ec7F1F5012CFEab0185bfc7aa3cf0DEc22",
+      cbBTC: "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf", DEGEN: "0x4ed4E862860beD51a9570b96d89aF5E1B0Efefed",
+      BRETT: "0x532f27101965dd16442E59d40670FaF5eBB142E4", HIGHER: "0x0578d8A44db98B23BF096A382e016e29a5Ce0ffe",
+      USDT: "0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2", DAI: "0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb",
     };
-    // Case-INSENSITIVE lookup: registry keys are mixed-case (cbBTC, cbETH) but
-    // symbols arrive in any case. A naive toUpperCase() match failed on cbBTC
-    // ("CBBTC" !== "cbBTC") — blocking a token that was actually supported.
-    const tokenOut = (() => {
-      if (!tokenSymbol) return null;
-      const want = tokenSymbol.toLowerCase();
-      for (const [sym, addr] of Object.entries(TOKEN_ADDRESSES)) {
-        if (sym.toLowerCase() === want) return addr;
-      }
-      return null;
-    })();
+    // Reject the zero address — Dune/agents sometimes emit 0x000…0 as a placeholder,
+    // which would route a swap to nowhere and revert (or burn USDC reaching forward()).
+    const isAddr = (s: string) => /^0x[a-fA-F0-9]{40}$/.test(s) && !/^0x0+$/.test(s);
+    const tokenOut =
+      isAddr(tokenAddrArg) ? tokenAddrArg :
+      isAddr(tokenSymbol)  ? tokenSymbol  :   // agent may pass the address as the symbol
+      (() => { const want = tokenSymbol.toLowerCase(); for (const [s, a] of Object.entries(TOKEN_ADDRESSES)) if (s.toLowerCase() === want) return a; return null; })();
     if (!tokenOut) {
-      return {
-        tool: name, args, cost: 0,
-        result: JSON.stringify({
-          blocked: true,
-          reason: tokenSymbol
-            ? ("Token " + tokenSymbol + " not in registry. Supported: " + Object.keys(TOKEN_ADDRESSES).join(", "))
-            : "No tokenSymbol provided — specify which token the whale bought (from checkWhaleTrades results)",
-        }),
-      };
+      console.warn(`[executeCopyTrade] BLOCKED — could not resolve token. symbol="${tokenSymbol}" addr="${tokenAddrArg}" (discovery convergence gives symbols only; only registry tokens or a real address can be copied)`);
+      return { tool: name, args, cost: 0, result: JSON.stringify({
+        blocked: true,
+        reason: `No token to copy: "${tokenSymbol || tokenAddrArg || "(empty)"}" is not a contract address and not in the known-token registry (${Object.keys(TOKEN_ADDRESSES).join(", ")}). Discovery convergence reports symbols only — copy a token whose address is known, or use friend mode (checkWhaleTrades returns real token addresses).`,
+      })};
     }
-    const amountNum = Number.parseFloat(amount) || 0;
+    console.log(`[executeCopyTrade] resolved token: ${tokenSymbol || "?"} → ${tokenOut} via ${protocol}`);
+
+    // Sizing: explicit amount, else copyRatio × budget (friend's-wallet mode:
+    // "copy at N% of my budget per trade"). Capped at 95% of the on-chain budget.
     const budgetNum = Number.parseFloat(ctx.budgetUsdc) || 0;
     const used      = ctx.budgetUsedUsdc ?? 0;
+    let amountNum   = Number.parseFloat(String(args.amount ?? "")) || 0;
+    if (amountNum <= 0 && rules.copyRatio && budgetNum > 0) amountNum = Math.max(0.01, budgetNum * rules.copyRatio);
+    if (amountNum <= 0) amountNum = 0.1;
+    const amount = amountNum.toFixed(4);
     if (budgetNum > 0 && (used + amountNum) > budgetNum * 0.95) {
       return {
         tool: name, args, cost: 0,
@@ -688,13 +711,24 @@ Return ONLY JSON: { "riskLevel": "LOW"|"MEDIUM"|"HIGH", "safeToExecute": true|fa
         // not-executed" while the tx actually succeeded on-chain. Wait long enough.
         signal: AbortSignal.timeout(120000),
       });
-      const data = await res.json() as { submitted?: boolean; prepared?: boolean; txHash?: string; via?: string };
+      const data = await res.json() as { submitted?: boolean; prepared?: boolean; txHash?: string; via?: string; error?: string; code?: string };
+      const landed = !!data.txHash || data.submitted === true;
+      if (!landed) {
+        console.warn(`[executeCopyTrade] execute/defi returned no tx — token ${tokenSymbol} (${tokenOut}), amount ${amount}: ${data.error ?? data.code ?? "no txHash/submitted"}`);
+      }
       return {
         tool: name, args, txHash: data.txHash, cost: 0,
-        result: JSON.stringify({ reasoning: args.reasoning, tokenSymbol, tokenOut, submitted: data.submitted, prepared: data.prepared, txHash: data.txHash, via: data.via }),
+        result: JSON.stringify({
+          reasoning: args.reasoning, tokenSymbol, tokenOut, amount,
+          submitted: data.submitted, prepared: data.prepared, txHash: data.txHash, via: data.via,
+          // Surface WHY nothing landed so the canvas/run shows the real reason
+          // (relayer rejected, swap reverted — often no liquid pool at the fee tier)
+          // instead of a misleading "done".
+          ...(landed ? {} : { executed: false, error: data.error ?? data.code ?? "Relayer/swap did not produce a tx (likely no liquid pool for this token at the default fee tier, or relayer unavailable)." }),
+        }),
       };
     } catch (e) {
-      return { tool: name, args, result: JSON.stringify({ error: String(e) }) };
+      return { tool: name, args, result: JSON.stringify({ error: String(e), executed: false }) };
     }
   }
 

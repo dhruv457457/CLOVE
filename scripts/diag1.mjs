@@ -1,0 +1,17 @@
+import { http, encodeFunctionData, parseUnits, toHex } from "viem";
+import { privateKeyToAccount } from "viem/accounts";
+import { createDelegation, signDelegation, getSmartAccountsEnvironment } from "@metamask/smart-accounts-kit";
+import { encodeDelegations, decodeDelegations } from "@metamask/smart-accounts-kit/utils";
+const RELAYER="https://relayer.1shotapi.com/relayers", TGT="0x26a529124f0bbf9af9d8f9f84a43efe47cf1199a", FEE="0xE936e8FAf4A5655469182A49a505055B71C17604", USDC="0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
+const pk="0xe40b623ca52ee6d953a59de96bdc00db6ffdc07cfc8f47ea47e5f62c7f7a3d0e";
+const acct=privateKeyToAccount(pk); const env=getSmartAccountsEnvironment(8453);
+const erc20=[{name:"transfer",type:"function",stateMutability:"nonpayable",inputs:[{name:"to",type:"address"},{name:"amount",type:"uint256"}],outputs:[{type:"bool"}]}];
+const tj=v=>v==null?null:typeof v==="bigint"?toHex(v):Array.isArray(v)?v.map(tj):typeof v==="object"?Object.fromEntries(Object.entries(v).map(([k,x])=>[k,tj(x)])):v;
+const rpc=async(m,p,id=1)=>(await fetch(RELAYER,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({jsonrpc:"2.0",id,method:m,params:p})})).json();
+const d=createDelegation({from:acct.address,to:TGT,environment:env,scope:{type:"erc20TransferAmount",tokenAddress:USDC,maxAmount:parseUnits("0.2",6)}});
+const sig=await signDelegation({privateKey:pk,delegation:d,delegationManager:env.DelegationManager,chainId:8453,allowInsecureUnrestrictedDelegation:false});
+const ctx=decodeDelegations(encodeDelegations([{...d,signature:sig}])).map(tj);
+const fee=await rpc("relayer_getFeeData",{chainId:"8453",token:USDC});
+const ex=[{target:USDC,value:"0",data:encodeFunctionData({abi:erc20,functionName:"transfer",args:[FEE,parseUnits("0.05",6)]})},{target:USDC,value:"0",data:encodeFunctionData({abi:erc20,functionName:"transfer",args:[acct.address,parseUnits("0.01",6)]})}];
+const r=await rpc("relayer_send7710Transaction",{chainId:"8453",context:fee.result.context,transactions:[{permissionContext:ctx,executions:ex}],memo:"diag1hop"},7);
+console.log("SINGLE-HOP result:",JSON.stringify(r));

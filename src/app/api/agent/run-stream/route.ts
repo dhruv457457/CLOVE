@@ -131,7 +131,11 @@ export async function POST(request: NextRequest) {
         const knowledge    = await getRelevantKnowledge(agent.id, agent.goal, 5);
         const fullMemory   = memoryPrompt + formatKnowledgeForPrompt(knowledge);
         const insights     = await getRelevantInsights(agent.id, agent.walletAddress, agent.goal, 6);
-        const plan: Plan   = await veniceGeneratePlan(agent.goal, fullMemory, insights, agent.agentType);
+        // Copy-trader has two modes — tell the planner which entry tool to use:
+        // friend mode (wallets set) → checkWhaleTrades; discovery → discoverWhales.
+        const hasWallets   = Array.isArray((agent.typeConfig as { wallets?: unknown[] } | undefined)?.wallets)
+          && ((agent.typeConfig as { wallets: unknown[] }).wallets.length > 0);
+        const plan: Plan   = await veniceGeneratePlan(agent.goal, fullMemory, insights, agent.agentType, hasWallets);
 
         const planId = await emit("plan", {
           reasoning: plan.reasoning,
@@ -273,14 +277,112 @@ export async function POST(request: NextRequest) {
           if (fSubmitted) { txHashSeen = forced.txHash; executedOnce = true; lastAction = "deposit"; }
         }
 
+        // ── FORCED COPY — deterministic perception + execution ────────────────
+        // Venice's tool-calling is unreliable: some runs it never calls ANY tool
+        // (no discoverWhales, no executeCopyTrade — just text). The agent must
+        // not depend on the model's mood for its data: if the LLM skipped the
+        // read tool, the SERVER fetches the smart-money data itself, then mirrors
+        // the strongest copyable signal deterministically. The LLM judges; the
+        // pipeline perceives and acts. Every non-execution records a holdReason
+        // the user can actually see.
+        let holdReason: string | null = null;
+        const isCopyType = agent.agentType === "copy-trader";
+        if (isCopyType && !executedOnce) {
+          if (!canSpend) {
+            holdReason = "No spending authority — agent has no real permission or zero budget.";
+          } else if (sawHighRisk) {
+            holdReason = "Risk check returned HIGH — execution intentionally skipped.";
+          } else {
+            // 1. Deterministic perception: if the model never called its read tool,
+            //    fetch the data server-side so the run always has real signals.
+            const hasWhaleData = allToolResults.some(r => r.tool === "discoverWhales" || r.tool === "checkWhaleTrades");
+            if (!hasWhaleData) {
+              const readTool = hasWallets ? "checkWhaleTrades" : "discoverWhales";
+              await emit("plan", { observation: `Model skipped its tools this run — fetching smart-money data deterministically via ${readTool}.` }, planId, { x: 380, y: canvasY });
+              canvasY += 100;
+              const read = await executeTool(readTool, {}, ctx);
+              allToolResults.push(read);
+              let rparsed: Record<string, unknown> = {};
+              try { rparsed = JSON.parse(read.result) as Record<string, unknown>; } catch { /**/ }
+              await emit("tool-result", { tool: readTool, ...rparsed }, planId, { x: 600, y: canvasY });
+              canvasY += 120;
+            }
+
+            // 2. Resolve the copy target: discoverWhales.copyTarget (discovery),
+            //    else the freshest checkWhaleTrades trade with a real address (friend).
+            let copyAddr: string | undefined, copySym: string | undefined;
+            for (const r of allToolResults) {
+              if (r.tool === "discoverWhales") {
+                try {
+                  const d = JSON.parse(r.result) as { copyTarget?: { tokenAddress?: string; symbol?: string } };
+                  if (d.copyTarget?.tokenAddress) { copyAddr = d.copyTarget.tokenAddress; copySym = d.copyTarget.symbol; }
+                } catch { /**/ }
+              }
+              if (r.tool === "checkWhaleTrades" && !copyAddr) {
+                try {
+                  const d = JSON.parse(r.result) as { trades?: Array<{ token?: string; symbol?: string }> };
+                  const t = (d.trades ?? []).find(x => typeof x.token === "string" && /^0x[a-fA-F0-9]{40}$/.test(x.token!) && !/^0x0+$/.test(x.token!));
+                  if (t) { copyAddr = t.token; copySym = t.symbol; }
+                } catch { /**/ }
+              }
+            }
+
+            // 3. Act deterministically — or record exactly why we can't.
+            if (!copyAddr) {
+              holdReason = hasWallets
+                ? "Tracked wallets made no qualifying buys in the lookback window — nothing to copy."
+                : "No converged token carried a usable contract address (no liquidity match) — nothing safe to copy.";
+            } else {
+              const budgetNum = Number(agent.budgetUsdc) || 1;
+              const ratio = (agent.typeConfig as { copyRules?: { copyRatio?: number } } | undefined)?.copyRules?.copyRatio;
+              const amount = Math.max(0.1, Math.min(ratio ? budgetNum * ratio : budgetNum * 0.1, budgetNum - 0.2)).toFixed(4);
+
+              await emit("plan", { observation: `Mirroring smart-money convergence — executeCopyTrade(${copySym ?? copyAddr.slice(0, 8)}, ${amount} USDC).` }, planId, { x: 380, y: canvasY });
+              canvasY += 100;
+
+              const forced = await executeTool("executeCopyTrade", {
+                protocol: "uniswap", tokenAddress: copyAddr, tokenSymbol: copySym ?? "",
+                amount, reasoning: "Forced copy: clear converged signal, risk not HIGH.",
+              }, ctx);
+              allToolResults.push(forced);
+
+              let fparsed: Record<string, unknown> = {};
+              try { fparsed = JSON.parse(forced.result) as Record<string, unknown>; } catch { /**/ }
+              await emit("tool-result", { tool: "executeCopyTrade", ...fparsed, txHash: forced.txHash }, planId, { x: 600, y: canvasY });
+              canvasY += 120;
+
+              const fSubmitted = !!forced.txHash || /"submitted":\s*true/.test(forced.result);
+              if (fSubmitted) { txHashSeen = forced.txHash; executedOnce = true; lastAction = "deposit"; }
+              else {
+                holdReason = String(
+                  fparsed.error ?? fparsed.reason ??
+                  "Swap was attempted but did not land on-chain (relayer or pool issue).",
+                );
+              }
+            }
+          }
+        }
+
         // If no executeDefi succeeded, the action was HOLD
         if (!executedOnce && lastAction === "skip") lastAction = "hold";
+
+        // ── HOLD REASON — make "nothing happened" visible, never silent ────────
+        // The user must always be able to answer "why didn't it trade?" from the
+        // canvas itself. Emitted as a node, fed to the reflection (so it can't
+        // fabricate an execution), and stored on the run record below.
+        if (!executedOnce && holdReason) {
+          await emit("plan", { observation: `⚠ Held — ${holdReason}` }, planId, { x: 380, y: canvasY });
+          canvasY += 100;
+        }
 
         // ── PHASE 3: REFLECT ───────────────────────────────────────────────────
         await bumpAgentCounters(agent.id, { status: "reflecting" });
         send("status", { phase: "reflecting" });
 
-        const reflection: Reflection = await veniceReflect(agent.goal, plan, allToolResults);
+        const reflection: Reflection = await veniceReflect(agent.goal, plan, allToolResults, {
+          executed: executedOnce,
+          holdReason,
+        });
 
         // Embed the insight for semantic retrieval in future runs
         const insightEmbedding = await embedText(reflection.insight).catch(() => undefined);
@@ -469,7 +571,9 @@ export async function POST(request: NextRequest) {
           })(),
           txHash:        txHashSeen ?? null,
           costPaid:      x402Total,
-          veniceReason:  reflection.insight,
+          // For held runs, the stored reason is the REAL hold reason — the user
+          // reads this in history to answer "why didn't it trade?".
+          veniceReason:  !executedOnce && holdReason ? `Held — ${holdReason}` : reflection.insight,
           durationMs:    0,
         });
 

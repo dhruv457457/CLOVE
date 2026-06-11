@@ -1,182 +1,134 @@
 import { NextRequest, NextResponse } from "next/server";
+import { createPublicClient, http, parseAbi, parseAbiItem, formatUnits } from "viem";
+import { base } from "viem/chains";
 
 /**
- * GET /api/whale/activity?wallets=0xabc,0xdef&hours=24
+ * GET /api/whale/activity?wallets=0xabc,0xdef&hours=2
  *
- * Reads the recent on-chain transactions of tracked "smart money" wallets from
- * Basescan and extracts DEX swap activity. This is REAL on-chain data — the
- * agent is genuinely watching other people's wallets, not a mock feed.
+ * Reads a wallet's recent token ACQUISITIONS directly from Base via RPC — the
+ * ERC-20 Transfer logs where `to == wallet` (i.e. tokens the wallet just bought
+ * /received from a swap). 100% Base-native: no Basescan, no Etherscan V2 (whose
+ * free tier doesn't cover Base — the old bug that made this endpoint return
+ * empty). Works for ANY address: discovered whales OR a friend's wallet.
  *
- * Uses the Etherscan V2 multichain API (chainid=8453 for Base). A free API key
- * works; without one we fall back to the no-key endpoint (rate-limited).
+ * Returns each acquisition WITH the token amount, so callers can apply copy
+ * conditions ("only copy buys ≥ X tokens") and proportional sizing.
  */
 
-// Known DEX routers on Base — used to classify a tx as a swap.
-const BASE_DEX_ROUTERS: Record<string, string> = {
-  "0x6ff5693b99212da76ad316178a184ab56d299b43": "Uniswap Universal Router",
-  "0x2626664c2603336e57b271c5c0b26f421741e481": "Uniswap V3 Router",
-  "0xcf77a3ba9a5ca399b7c97c74d54e5b1beb874e43": "Aerodrome Router",
-  "0x827922686190790b37229fd06084350e74485b72": "Aerodrome Router 2",
-  "0x198ef79f1f515f02dfe9e3115ed9fc07183f02fc": "1inch Router",
-};
+const RPC = process.env.BASE_RPC ?? "https://mainnet.base.org";
+const TRANSFER_EVENT = parseAbiItem("event Transfer(address indexed from, address indexed to, uint256 value)");
+const ERC20_META = parseAbi([
+  "function symbol() view returns (string)",
+  "function decimals() view returns (uint8)",
+]);
 
-interface BasescanTx {
-  hash:          string;
-  from:          string;
-  to:            string;
-  value:         string;
-  timeStamp:     string;
-  functionName?: string;
-  methodId?:     string;
-  isError?:      string;
-  tokenName?:    string;
-  tokenSymbol?:  string;
-}
+// Stables / quote assets — receiving these is usually a SALE, not a "buy signal".
+const QUOTE_TOKENS = new Set([
+  "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913", // USDC
+  "0xfde4c96c8593536e31f229ea8f37b2ada2699bb2", // USDT
+  "0x50c5725949a6f0c72e6c4a641f24049a917db0cb", // DAI
+].map(a => a.toLowerCase()));
 
 export interface WhaleTrade {
-  wallet:    string;
-  hash:      string;
-  to:        string;
-  router?:   string;     // matched DEX router label, if any
-  action:    string;     // decoded function name or "transfer"
-  symbol?:   string;
-  timestamp: number;
+  wallet:     string;
+  token:      string;     // token contract acquired
+  symbol:     string;
+  amount:     string;     // human-readable amount acquired
+  amountNum:  number;
+  from:       string;     // who sent it (usually a router/pool)
+  txHash:     string;
+  timestamp:  number;
   ageMinutes: number;
   basescanUrl: string;
 }
 
-async function fetchWalletTxs(wallet: string, apiKey: string, sinceTs: number): Promise<BasescanTx[]> {
-  const base = "https://api.etherscan.io/v2/api";
-  const common = {
-    chainid:    "8453",
-    module:     "account",
-    address:    wallet,
-    startblock: "0",
-    endblock:   "99999999",
-    page:       "1",
-    offset:     "30",
-    sort:       "desc",
-    apikey:     apiKey || "YourApiKeyToken",
-  };
-
-  try {
-    // Fetch BOTH normal txs (for DEX interactions) AND token transfers (for symbol data).
-    // BUG 4 fix: txlist never returns tokenSymbol. tokentx does — we use it to build
-    // a symbol map keyed by txHash so convergence can group by actual token, not router.
-    const [txRes, tokRes] = await Promise.all([
-      fetch(`${base}?${new URLSearchParams({ ...common, action: "txlist" })}`, { signal: AbortSignal.timeout(10000) }),
-      fetch(`${base}?${new URLSearchParams({ ...common, action: "tokentx" })}`, { signal: AbortSignal.timeout(10000) }),
-    ]);
-
-    const txData  = txRes.ok  ? await txRes.json()  as { status: string; result: BasescanTx[] | string } : { status: "0", result: [] };
-    const tokData = tokRes.ok ? await tokRes.json() as { status: string; result: BasescanTx[] | string } : { status: "0", result: [] };
-
-    // Build hash→symbol map from token transfers
-    const symbolByHash = new Map<string, string>();
-    if (tokData.status === "1" && Array.isArray(tokData.result)) {
-      for (const t of tokData.result as BasescanTx[]) {
-        if (t.tokenSymbol && t.hash) symbolByHash.set(t.hash, t.tokenSymbol);
-      }
-    }
-
-    if (txData.status !== "1" || !Array.isArray(txData.result)) return [];
-    return (txData.result as BasescanTx[])
-      .filter(tx => Number(tx.timeStamp) * 1000 >= sinceTs)
-      .map(tx => ({
-        ...tx,
-        // Enrich with the token symbol from the parallel tokentx response
-        tokenSymbol: tx.tokenSymbol ?? symbolByHash.get(tx.hash),
-      }));
-  } catch {
-    return [];
-  }
-}
-
-function classify(tx: BasescanTx): { action: string; router?: string } {
-  const toLower = (tx.to ?? "").toLowerCase();
-  const router  = BASE_DEX_ROUTERS[toLower];
-  let action = "transfer";
-  if (tx.functionName) {
-    const fn = tx.functionName.toLowerCase();
-    if (fn.includes("swap"))            action = "swap";
-    else if (fn.includes("addliquid")) action = "add-liquidity";
-    else if (fn.includes("deposit"))   action = "deposit";
-    else if (fn.includes("mint"))      action = "mint";
-    else action = tx.functionName.split("(")[0] || "call";
-  } else if (router) {
-    action = "swap";
-  }
-  return { action, router };
+const metaCache = new Map<string, { symbol: string; decimals: number }>();
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function tokenMeta(pub: any, token: `0x${string}`) {
+  const k = token.toLowerCase();
+  if (metaCache.has(k)) return metaCache.get(k)!;
+  let symbol = "?", decimals = 18;
+  try { symbol   = await pub.readContract({ address: token, abi: ERC20_META, functionName: "symbol" }) as string; } catch { /* */ }
+  try { decimals = await pub.readContract({ address: token, abi: ERC20_META, functionName: "decimals" }) as number; } catch { /* */ }
+  const m = { symbol, decimals };
+  metaCache.set(k, m);
+  return m;
 }
 
 export async function GET(request: NextRequest) {
-  const sp      = request.nextUrl.searchParams;
-  const walletsParam = sp.get("wallets");
-  const hours   = Math.min(Number(sp.get("hours") ?? "24"), 168);
-  const onlySwaps = sp.get("onlySwaps") !== "false";
-
-  // No fabricated default wallets — the copy-trader must supply real tracked
-  // wallets (via its typeConfig.wallets). Without them there is nothing real to watch.
-  const wallets = (walletsParam
-    ? walletsParam.split(",").map(w => w.trim()).filter(w => /^0x[a-fA-F0-9]{40}$/.test(w))
-    : []
-  ).slice(0, 10);  // cap to protect rate limits
+  const sp = request.nextUrl.searchParams;
+  const wallets = (sp.get("wallets") ?? "")
+    .split(",").map(w => w.trim().toLowerCase()).filter(w => /^0x[a-f0-9]{40}$/.test(w))
+    .slice(0, 5);
+  const hours = Math.min(Math.max(Number(sp.get("hours") ?? "2"), 0.25), 6);
 
   if (wallets.length === 0) {
-    return NextResponse.json({
-      trades: [], wallets: [], convergence: [],
-      error: "no wallets configured — pass ?wallets=0x.. (copy-trader requires real tracked wallets)",
-    });
+    return NextResponse.json({ trades: [], wallets: [], convergence: [], error: "no wallets — pass ?wallets=0x.." });
   }
 
-  const apiKey  = process.env.BASESCAN_API_KEY ?? process.env.ETHERSCAN_API_KEY ?? "";
-  const sinceTs = Date.now() - hours * 60 * 60 * 1000;
+  const pub = createPublicClient({ chain: base, transport: http(RPC) });
+  const latest = await pub.getBlockNumber();
+  // Base ≈ 2s blocks. Bound the range for public-RPC reliability (~3h max).
+  const span = BigInt(Math.min(Math.round(hours * 1800), 10000));
+  const fromBlock = latest > span ? latest - span : 0n;
+  const now = Date.now();
+  // Approximate per-block timestamp (avoids one getBlock per log).
+  const blockMs = (n: bigint) => now - Number(latest - n) * 2000;
 
-  const perWallet = await Promise.all(
-    wallets.map(async w => {
-      const txs = await fetchWalletTxs(w, apiKey, sinceTs);
-      return txs
-        .filter(tx => tx.isError !== "1")
-        .map<WhaleTrade>(tx => {
-          const { action, router } = classify(tx);
-          const ts = Number(tx.timeStamp) * 1000;
-          return {
-            wallet:      w,
-            hash:        tx.hash,
-            to:          tx.to,
-            router,
-            action,
-            symbol:      tx.tokenSymbol,
-            timestamp:   ts,
-            ageMinutes:  Math.round((Date.now() - ts) / 60000),
-            basescanUrl: `https://basescan.org/tx/${tx.hash}`,
-          };
-        });
-    }),
-  );
+  type XferLog = { address: string; args: { from?: string; to?: string; value?: bigint }; blockNumber?: bigint; transactionHash?: string };
+  const perWallet = await Promise.all(wallets.map(async (w) => {
+    let logs: XferLog[] = [];
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      logs = await (pub as any).getLogs({
+        fromBlock, toBlock: latest,
+        event: TRANSFER_EVENT,
+        args: { to: w as `0x${string}` },          // tokens the wallet RECEIVED (bought)
+      }) as XferLog[];
+    } catch { return [] as WhaleTrade[]; }
 
-  let trades = perWallet.flat().sort((a, b) => b.timestamp - a.timestamp);
-  if (onlySwaps) trades = trades.filter(t => t.action === "swap" || !!t.router);
+    const out: WhaleTrade[] = [];
+    for (const log of logs.slice(-40)) {   // newest-ish
+      const token = log.address.toLowerCase();
+      if (QUOTE_TOKENS.has(token)) continue;          // skip stablecoin inflows (sales)
+      const m = await tokenMeta(pub, log.address as `0x${string}`);
+      let amountNum = 0;
+      try { amountNum = Number(formatUnits(log.args.value ?? 0n, m.decimals)); } catch { /* */ }
+      if (amountNum <= 0) continue;
+      const ts = blockMs(log.blockNumber ?? latest);
+      out.push({
+        wallet: w, token, symbol: m.symbol,
+        amount: amountNum.toLocaleString(undefined, { maximumFractionDigits: 4 }),
+        amountNum,
+        from: (log.args.from ?? "").toLowerCase(),
+        txHash: log.transactionHash ?? "",
+        timestamp: ts,
+        ageMinutes: Math.round((now - ts) / 60000),
+        basescanUrl: `https://basescan.org/tx/${log.transactionHash}`,
+      });
+    }
+    return out;
+  }));
 
-  // Convergence detection: routers/tokens hit by multiple distinct wallets recently.
-  const byTarget = new Map<string, Set<string>>();
+  const trades = perWallet.flat().sort((a, b) => b.timestamp - a.timestamp);
+
+  // Convergence — a token acquired by 2+ tracked wallets in the window.
+  const byToken = new Map<string, { symbol: string; wallets: Set<string>; totalAmount: number }>();
   for (const t of trades) {
-    const key = t.symbol ?? t.to;
-    if (!byTarget.has(key)) byTarget.set(key, new Set());
-    byTarget.get(key)!.add(t.wallet);
+    const e = byToken.get(t.token) ?? { symbol: t.symbol, wallets: new Set(), totalAmount: 0 };
+    e.wallets.add(t.wallet); e.totalAmount += t.amountNum;
+    byToken.set(t.token, e);
   }
-  const convergence = [...byTarget.entries()]
-    .filter(([, ws]) => ws.size >= 2)
-    .map(([target, ws]) => ({ target, walletCount: ws.size }))
+  const convergence = [...byToken.entries()]
+    .filter(([, e]) => e.wallets.size >= 2)
+    .map(([token, e]) => ({ target: e.symbol, token, walletCount: e.wallets.size, totalAmount: e.totalAmount }))
     .sort((a, b) => b.walletCount - a.walletCount);
 
   return NextResponse.json({
-    trades:      trades.slice(0, 40),
-    wallets,
-    convergence,
+    trades: trades.slice(0, 40),
+    wallets, convergence,
     hours,
-    source:      "basescan",
-    hasApiKey:   !!apiKey,
-    fetchedAt:   Date.now(),
+    source: "base-rpc",
+    fetchedAt: now,
   });
 }

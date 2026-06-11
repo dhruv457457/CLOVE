@@ -940,6 +940,32 @@ export default function WorkflowDetailPage() {
     }
   }, [agents, workflow, loadWorkflow, loadHistory]);
 
+  // ── Fund Manager allocation (dynamic budget split) ──────────────────────────
+  type AllocOut = { reasoning?: string; source?: string; totalUsdc?: number; error?: string;
+    allocations?: { name: string; protocol: string; weight: number; capUsdc: number }[];
+    findings?: { protocol: string; apy?: number; risk?: string }[] };
+  const [allocResult, setAllocResult] = useState<AllocOut | null>(null);
+  const [allocating, setAllocating]   = useState(false);
+  // Per-protocol executors carry typeConfig.protocols — only then is a split possible.
+  const canAllocate = agents.filter(a =>
+    Array.isArray((a as { typeConfig?: { protocols?: string[] } }).typeConfig?.protocols) &&
+    /executor/i.test(a.name)).length >= 2;
+
+  const runAllocation = useCallback(async () => {
+    setAllocating(true); setAllocResult(null);
+    try {
+      const mm = metamaskStore.getState();
+      const res = await fetch(`/api/workflow/${workflowId}/allocate-budget`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ walletAddress: mm.userAddress, riskTolerance: "moderate" }),
+      });
+      setAllocResult(await res.json());
+      await loadWorkflow();
+    } catch (e) {
+      setAllocResult({ error: e instanceof Error ? e.message : String(e) });
+    } finally { setAllocating(false); }
+  }, [workflowId, loadWorkflow]);
+
   const isOrchestrated = agents.length === 3; // 3-agent workflow = Scout/Risk/Executor
   const isLiveRunning  = live.phase !== "idle" && live.phase !== "complete" && live.phase !== "failed";
   const canRun         = isOrchestrated ? !isLiveRunning : !running && agents.length > 0;
@@ -1040,6 +1066,24 @@ export default function WorkflowDetailPage() {
           </button>
         )}
 
+        {/* Fund Manager allocation — dynamic budget split */}
+        {canAllocate && (
+          <button
+            onClick={runAllocation}
+            disabled={allocating}
+            title="Fund Manager reads live yields and splits the budget into on-chain-capped slices per protocol"
+            style={{
+              display: "inline-flex", alignItems: "center", gap: 6,
+              padding: "6px 12px", borderRadius: 7,
+              background: "rgba(139,107,255,0.12)", border: "1px solid rgba(139,107,255,0.4)",
+              color: "#B9A8FF", fontWeight: 600, fontSize: 12,
+              cursor: allocating ? "not-allowed" : "pointer", opacity: allocating ? 0.6 : 1,
+            }}
+          >
+            ⚖️ {allocating ? "Allocating…" : "Allocate budget"}
+          </button>
+        )}
+
         {/* Run button */}
         {isOrchestrated ? (
           <button
@@ -1093,6 +1137,43 @@ export default function WorkflowDetailPage() {
           {agents.length === 0 && (
             <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", color: MID, fontSize: 13, fontStyle: "italic" }}>
               No agents in this workflow yet.
+            </div>
+          )}
+
+          {/* Fund Manager allocation result — the dynamic-split decision */}
+          {allocResult && (
+            <div style={{
+              position: "absolute", top: 16, right: 16, width: 320, zIndex: 20,
+              background: INK_1, border: "1px solid rgba(139,107,255,0.4)", borderRadius: 12,
+              padding: 16, boxShadow: "0 12px 40px -12px rgba(0,0,0,0.7)",
+            }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+                <span style={{ fontSize: 11, letterSpacing: "0.12em", textTransform: "uppercase", color: "#B9A8FF", fontWeight: 700 }}>⚖️ Fund Manager allocation</span>
+                <button onClick={() => setAllocResult(null)} style={{ background: "none", border: "none", color: MID, cursor: "pointer", fontSize: 14 }}>×</button>
+              </div>
+              {allocResult.error ? (
+                <div style={{ fontSize: 12.5, color: "#FF8A66" }}>{allocResult.error}</div>
+              ) : (
+                <>
+                  <p style={{ fontSize: 12.5, lineHeight: 1.5, color: TEXT, margin: "0 0 12px" }}>{allocResult.reasoning}</p>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    {(allocResult.allocations ?? []).map((a) => (
+                      <div key={a.name}>
+                        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: TEXT2, marginBottom: 3 }}>
+                          <span style={{ textTransform: "capitalize" }}>{a.protocol}</span>
+                          <span style={{ color: "#B9A8FF", fontWeight: 600 }}>{Math.round(a.weight * 100)}% · {a.capUsdc} USDC cap</span>
+                        </div>
+                        <div style={{ height: 5, borderRadius: 3, background: "rgba(255,255,255,0.06)", overflow: "hidden" }}>
+                          <div style={{ width: `${a.weight * 100}%`, height: "100%", background: "#8B6BFF" }} />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{ fontSize: 10.5, color: MID, marginTop: 10 }}>
+                    {allocResult.source === "venice" ? "Decided by Venice from live yields" : "Equal split (fallback)"} · each % is now an on-chain cap
+                  </div>
+                </>
+              )}
             </div>
           )}
         </section>

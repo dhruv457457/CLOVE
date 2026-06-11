@@ -328,6 +328,31 @@ export async function POST(request: NextRequest) {
 
     if (autoDepositContract && protocolName) {
       try {
+        // 1Shot track: on FIRST use, include a 7702 authorizationList to upgrade
+        // CLOVE's session (Fund Manager) EOA to a smart account THROUGH the
+        // relayer. No-op once it already has code. Never blocks the deposit.
+        let authorizationList: unknown[] | undefined;
+        try {
+          const { build7702Authorization } = await import("@/lib/web3/upgrade7702");
+          const { getSessionPrivateKey } = await import("@/lib/config/env");
+          const auth = await build7702Authorization(getSessionPrivateKey() as `0x${string}`, 8453);
+          if (auth) authorizationList = [auth];
+        } catch { /* non-fatal — proceed without the upgrade */ }
+
+        // Copy-trade swap? (uniswap/aerodrome + a specific tokenOut from the whale's
+        // buy) → use forwardSwap to mirror ANY token. Else the normal forward().
+        const tokenOut = nodeConfig?.tokenOut as string | undefined;
+        const isCopySwap = (protocolName === "uniswap" || protocolName === "aerodrome")
+          && !!tokenOut && /^0x[a-fA-F0-9]{40}$/.test(tokenOut);
+        const completeForward = async (): Promise<`0x${string}`> => {
+          if (isCopySwap) {
+            const { forwardSwapToken } = await import("@/lib/web3/cloveAutoDeposit");
+            return forwardSwapToken(walletAddress as `0x${string}`, tokenOut as `0x${string}`, defaultAmount, protocolName === "aerodrome");
+          }
+          const { forwardToProtocol } = await import("@/lib/web3/cloveAutoDeposit");
+          return forwardToProtocol(walletAddress as `0x${string}`, protocolName, defaultAmount);
+        };
+
         // Step 1: relayer sends USDC to CloveAutoDeposit via delegated transfer.
         // The erc20-token-periodic enforcer allows USDC.transfer(contract, amount) ✅
         const relayResult = await executeViaPublicRelayer({
@@ -335,6 +360,7 @@ export async function POST(request: NextRequest) {
           recipient:              autoDepositContract,
           workAmountUsdc:         Number(defaultAmount) / 1e6,
           memo:                   `CLOVE: USDC→${protocolName} via CloveAutoDeposit`,
+          authorizationList,
         });
 
         // Call forward() when:
@@ -342,26 +368,42 @@ export async function POST(request: NextRequest) {
         //   b) Relayer status failed BUT USDC already arrived in the contract
         //      (happens when relayer marks tx as 400 despite executing on-chain)
         const relaySuccess = relayResult.status !== "failed" && !!relayResult.txHash;
-        const { forwardToProtocol } = await import("@/lib/web3/cloveAutoDeposit");
 
         if (relaySuccess) {
-          const forwardTx = await forwardToProtocol(walletAddress as `0x${string}`, protocolName, defaultAmount);
-          const { resolveReceivedToken } = await import("@/lib/web3/cloveAutoDeposit");
-          const receiptToken = await resolveReceivedToken(forwardTx, walletAddress as `0x${string}`);
-          return NextResponse.json({
-            submitted: true, txHash: forwardTx, relayTxHash: relayResult.txHash,
-            taskId: relayResult.taskId, action: actionKey, protocol,
-            contractAddress: autoDepositContract, amount: defaultAmount.toString(),
-            feeUsdc: relayResult.feeUsdc, via: "clove-auto-deposit",
-            receiptToken, receivedAmount: receiptToken?.amount ?? (Number(defaultAmount) / 1e6).toString(),
-          });
+          try {
+            const forwardTx = await completeForward();
+            const { resolveReceivedToken } = await import("@/lib/web3/cloveAutoDeposit");
+            const receiptToken = await resolveReceivedToken(forwardTx, walletAddress as `0x${string}`);
+            return NextResponse.json({
+              submitted: true, txHash: forwardTx, relayTxHash: relayResult.txHash,
+              taskId: relayResult.taskId, action: actionKey, protocol,
+              contractAddress: autoDepositContract, amount: defaultAmount.toString(),
+              feeUsdc: relayResult.feeUsdc, via: "clove-auto-deposit",
+              receiptToken, receivedAmount: receiptToken?.amount ?? (Number(defaultAmount) / 1e6).toString(),
+            });
+          } catch (fwdErr) {
+            // CRITICAL: the relayer ALREADY moved USDC into the contract. Do NOT
+            // fall through to the no-contract fallback transfer below — that would
+            // double-spend the budget. The parked USDC is recoverable on-chain via
+            // CloveAutoDeposit.recover() by the operator. Surface the real reason.
+            const msg = fwdErr instanceof Error ? fwdErr.message : String(fwdErr);
+            console.warn(`[execute/defi] forward()/forwardSwap() failed after USDC delegated — funds parked in contract:`, msg);
+            return NextResponse.json({
+              submitted: false,
+              error: `USDC was delegated to the contract but the on-chain ${protocolName} call failed: ${msg}`,
+              code: "forward-failed",
+              relayTxHash: relayResult.txHash, taskId: relayResult.taskId,
+              contractAddress: autoDepositContract, amount: defaultAmount.toString(),
+              parkedInContract: true, via: "clove-auto-deposit-forward-failed",
+            }, { status: 502 });
+          }
         }
 
         // Relayer says failed — but check if USDC landed in contract anyway
         // (relayer sometimes returns 400 despite the on-chain transfer succeeding)
         console.warn("[execute/defi] Relayer status failed — checking contract balance...");
         try {
-          const forwardTx = await forwardToProtocol(walletAddress as `0x${string}`, protocolName, defaultAmount);
+          const forwardTx = await completeForward();
           const { resolveReceivedToken } = await import("@/lib/web3/cloveAutoDeposit");
           const receiptToken = await resolveReceivedToken(forwardTx, walletAddress as `0x${string}`);
           return NextResponse.json({

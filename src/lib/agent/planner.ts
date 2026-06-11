@@ -33,7 +33,7 @@ export interface Plan {
 }
 
 /** Build the system prompt for the planner — uses memory + insights to plan smarter. */
-function planSystemPrompt(memoryPrompt: string, insights: AgentInsight[], agentType?: AgentType): string {
+function planSystemPrompt(memoryPrompt: string, insights: AgentInsight[], agentType?: AgentType, hasWallets = false): string {
   const insightLines = insights.length
     ? insights.map(i => {
         // Show scope so the planner knows when an insight came from a teammate
@@ -78,11 +78,28 @@ function planSystemPrompt(memoryPrompt: string, insights: AgentInsight[], agentT
 
   // Type-specific planning rules. Generic yield/rebalancer keep the original
   // rules; the "true agent" archetypes get rules matching their workflow.
+  // Copy-trader has TWO modes — the planner must pick the right entry tool:
+  //   • FRIEND mode (wallets configured): copy each qualifying buy from THOSE
+  //     wallets directly — the user chose them, so no 2+ convergence is required.
+  //   • DISCOVERY mode (no wallets): discoverWhales finds smart money first, and
+  //     convergence (2+ wallets on one token) is the safety gate against being exit
+  //     liquidity.
+  // ⚠️ CRITICAL: the read tool (discoverWhales / checkWhaleTrades) and
+  // executeCopyTrade MUST live in the SAME subgoal. Each subgoal runs as an
+  // isolated reasoning loop, so a split means the copy step never sees which
+  // token was discovered — and the agent holds forever. Keep them together.
+  const copyTraderRules = hasWallets
+?
+`1. Plan a SINGLE subgoal that contains BOTH checkWhaleTrades AND executeCopyTrade AND notifyUser together — they MUST share one reasoning step so the token's CONTRACT ADDRESS from the trade flows straight into the copy. NEVER split them across subgoals.
+2. Inside that subgoal: read your tracked wallets' recent buys, then copy EACH fresh buy that passes the copy rules (minTokenAmount) via executeCopyTrade — pass the token's CONTRACT ADDRESS from the trade. You do NOT need 2+ convergence; the user chose these wallets.
+3. Skip a copy only for an obvious scam/honeypot, not for ordinary buys. End by notifying the user. Generate 1–2 subgoals total.`
+:
+`1. Plan a SINGLE subgoal that contains BOTH discoverWhales AND executeCopyTrade AND notifyUser together — they MUST share one reasoning step so the converged token flows straight into the copy. NEVER split them across subgoals (a split makes the copy step blind and the agent holds).
+2. Inside that subgoal: call discoverWhales (no wallets are configured), then copy the STRONGEST converged token (most wallets) via executeCopyTrade — pass its CONTRACT ADDRESS, or the symbol if that's all the result gives.
+3. End by notifying the user. Generate 1–2 subgoals total.`;
+
   const rulesByType: Partial<Record<AgentType, string>> = {
-    "copy-trader":
-`1. Start with checkWhaleTrades to read tracked wallets' recent swaps.
-2. Plan executeCopyTrade ONLY when 2+ wallets converge on the same token (use checkRisk to sanity-check).
-3. Always end with notifyUser. Generate 2–4 subgoals maximum.`,
+    "copy-trader": copyTraderRules,
     narrative:
 `1. Plan monitorPositions FIRST — exit cooling narratives you already hold via executeDefi before considering new buys.
 2. Then checkNarratives for raw signals; YOU judge early-vs-late and volume confirmation (record it with addThought).
@@ -135,53 +152,85 @@ export async function veniceGeneratePlan(
   memoryPrompt:  string,
   insights:      AgentInsight[],
   agentType?:    AgentType,
+  hasWallets:    boolean = false,
 ): Promise<Plan> {
-  const client = getVeniceClient();
-  try {
-    const res = await client.chat.completions.create({
-      model: VENICE_MODELS.analyst,
-      messages: [
-        { role: "system", content: planSystemPrompt(memoryPrompt, insights, agentType) },
-        { role: "user",   content: `Goal: ${goal}\n\nReturn ONLY the JSON plan.` },
-      ],
-      temperature: 0.4,
-      response_format: { type: "json_object" },
-    });
-    const raw  = res.choices[0]?.message?.content ?? "{}";
-    // LLM-4 fix: some models (GLM, Llama) wrap JSON in ```json ... ``` fences.
-    // Strip markdown code fences before parsing.
-    const text = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/, "").trim();
-    const parsed = JSON.parse(text) as Plan;
-    if (!Array.isArray(parsed.subgoals) || parsed.subgoals.length === 0) {
-      throw new Error("Empty subgoals list");
+  const client  = getVeniceClient();
+  const system  = planSystemPrompt(memoryPrompt, insights, agentType, hasWallets);
+  const userMsg = `Goal: ${goal}\n\nReturn ONLY the JSON plan.`;
+
+  // The analyst model (GLM) returns EMPTY content when response_format=json_object
+  // is forced — that's the "Unexpected end of JSON input" we kept hitting. So:
+  //   • call GLM WITHOUT json mode (rely on the "ONLY JSON" prompt + fence strip),
+  //   • retry once, and
+  //   • on the final attempt use the compiler model (qwen), which DOES honour
+  //     json_object reliably.
+  const attempts: Array<{ model: string; jsonMode: boolean }> = [
+    { model: VENICE_MODELS.analyst,  jsonMode: false },
+    { model: VENICE_MODELS.analyst,  jsonMode: false },
+    { model: VENICE_MODELS.compiler, jsonMode: true  },
+  ];
+
+  for (let i = 0; i < attempts.length; i++) {
+    const { model, jsonMode } = attempts[i];
+    try {
+      const res = await client.chat.completions.create({
+        model,
+        messages: [
+          { role: "system", content: system },
+          { role: "user",   content: userMsg },
+        ],
+        temperature: 0.4,
+        ...(jsonMode ? { response_format: { type: "json_object" as const } } : {}),
+      });
+      const raw = res.choices[0]?.message?.content ?? "";
+      // Some models wrap JSON in ```json ... ``` fences — strip before parsing.
+      const text = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/, "").trim();
+      if (!text) throw new Error("empty response content");
+      const parsed = JSON.parse(text) as Plan;
+      if (!Array.isArray(parsed.subgoals) || parsed.subgoals.length === 0) {
+        throw new Error("empty subgoals list");
+      }
+      return {
+        reasoning: parsed.reasoning ?? "Plan generated.",
+        subgoals: parsed.subgoals.map((s, idx) => ({
+          id:          s.id          ?? `s${idx + 1}`,
+          description: s.description ?? "(no description)",
+          tools:       Array.isArray(s.tools) ? s.tools : [],
+        })),
+      };
+    } catch (e) {
+      console.warn(`[planner] attempt ${i + 1}/${attempts.length} (${model}${jsonMode ? ", json" : ""}) failed:`, e instanceof Error ? e.message : e);
+      // try the next attempt; on the last one we fall through to the default plan
     }
-    return {
-      reasoning: parsed.reasoning ?? "Plan generated.",
-      subgoals: parsed.subgoals.map((s, i) => ({
-        id:          s.id          ?? `s${i + 1}`,
-        description: s.description ?? "(no description)",
-        tools:       Array.isArray(s.tools) ? s.tools : [],
-      })),
-    };
-  } catch (e) {
-    // Fallback: a sensible default plan so the loop never gets stuck.
-    // Type-aware so specialized agents don't fall back to the yield flow.
-    console.warn("[planner] veniceGeneratePlan failed, using fallback:", e);
-    return fallbackPlan(agentType);
   }
+
+  // Fallback: a sensible, type-aware default plan so the loop never gets stuck.
+  console.warn("[planner] all attempts failed — using fallback plan");
+  return fallbackPlan(agentType, hasWallets);
 }
 
 /** A minimal, valid default plan per agent type (used when the LLM call fails). */
-function fallbackPlan(agentType?: AgentType): Plan {
+function fallbackPlan(agentType?: AgentType, hasWallets = false): Plan {
   switch (agentType) {
     case "copy-trader":
-      return {
-        reasoning: "Default plan: read whale trades → copy convergence → notify.",
-        subgoals: [
-          { id: "s1", description: "Read tracked wallets' recent swaps", tools: ["checkWhaleTrades"] },
-          { id: "s2", description: "Copy any converging signal",         tools: ["executeCopyTrade", "notifyUser"] },
-        ],
-      };
+      // Mode-aware: discovery (no wallets) MUST start with discoverWhales, else
+      // checkWhaleTrades returns nothing and the agent holds forever.
+      // ONE subgoal: read + copy + notify share a single reasoning loop so the
+      // discovered token's address flows into executeCopyTrade. Splitting them
+      // makes the copy step blind (separate subgoals don't share context).
+      return hasWallets
+        ? {
+            reasoning: "Default plan: read tracked wallets' buys and copy each qualifying one, then notify.",
+            subgoals: [
+              { id: "s1", description: "Read tracked wallets' recent buys and copy each qualifying buy", tools: ["checkWhaleTrades", "executeCopyTrade", "notifyUser"] },
+            ],
+          }
+        : {
+            reasoning: "Default plan: discover smart money and copy the strongest converged buy, then notify.",
+            subgoals: [
+              { id: "s1", description: "Discover smart money and copy the strongest converged token", tools: ["discoverWhales", "executeCopyTrade", "notifyUser"] },
+            ],
+          };
     case "narrative":
       return {
         reasoning: "Default plan: check held positions → exit cooling → scan → buy early → notify.",
@@ -223,6 +272,9 @@ export async function veniceReflect(
   goal:        string,
   plan:        Plan,
   toolResults: Array<{ tool: string; result: string }>,
+  /** Ground truth about on-chain execution — prevents the model fabricating
+   *  "executed X" insights on runs where nothing was broadcast. */
+  execution?:  { executed: boolean; holdReason?: string | null },
 ): Promise<Reflection> {
   const client = getVeniceClient();
   // LLM-3 fix: 200 chars cuts off APY data mid-sentence. Use 800 chars so the
@@ -260,13 +312,21 @@ Return ONLY JSON:
 }`;
 
   try {
+    // Ground-truth execution line — without this the model routinely INVENTS
+    // "executed copy trade with token XYZ" on runs where nothing was broadcast.
+    const execLine = execution
+      ? execution.executed
+        ? "GROUND TRUTH: a real on-chain transaction WAS broadcast this run."
+        : `GROUND TRUTH: NO on-chain transaction was broadcast this run — do NOT claim any trade, deposit, or execution happened. The run held${execution.holdReason ? ` because: ${execution.holdReason}` : ""}. Your insight must reflect the hold and its reason.`
+      : "";
+
     const res = await client.chat.completions.create({
       // LLM-2 fix: reflection writes permanent memory — use the full 70B model,
       // not the 3B fast model. Low-quality insights poison every future plan.
       model: VENICE_MODELS.reasoning,
       messages: [
         { role: "system", content: sys },
-        { role: "user", content: `Goal: ${goal}\n\nPlan reasoning: ${plan.reasoning}\n\nResults:\n${resultsBlock}\n\nReturn ONLY JSON.` },
+        { role: "user", content: `Goal: ${goal}\n\nPlan reasoning: ${plan.reasoning}\n\nResults:\n${resultsBlock}\n\n${execLine}\n\nReturn ONLY JSON.` },
       ],
       temperature: 0.3,
       // NOTE: llama-3.3-70b on Venice returns a bare 400 when response_format is
@@ -286,9 +346,12 @@ Return ONLY JSON:
   } catch (e) {
     console.warn("[planner] veniceReflect failed:", e);
     return {
-      insight: "Run completed (no LLM reflection available).",
+      // Even without the LLM, the insight must be truthful about a hold.
+      insight: execution && !execution.executed
+        ? `Held — ${execution.holdReason ?? "no qualifying action this run"}.`.slice(0, 280)
+        : "Run completed (no LLM reflection available).",
       tags: [],
-      didSucceed: true,
+      didSucceed: execution ? execution.executed : true,
     };
   }
 }

@@ -1,6 +1,6 @@
 "use client";
 
-import React from "react";
+import React, { useState } from "react";
 import { Handle, Position } from "@xyflow/react";
 
 const ACCENT  = "#C8FF3D";
@@ -48,6 +48,11 @@ const TOOL: Record<string, { label: string; icon: React.ReactNode; tint: string 
 export function AgentThoughtNode({ data, selected }: { data: ThoughtNodeData; selected?: boolean }) {
   const { type, content } = data;
 
+  // Expansion is now driven by an explicit per-node toggle (NOT selection), so
+  // opening one node no longer collapses the others. Each node remembers its own
+  // open/closed state for the life of the canvas.
+  const [expanded, setExpanded] = useState(false);
+
   const accentFor: Record<ThoughtType, string> = {
     "goal": ACCENT, "plan": TEXT2, "tool-call": ACCENT,
     "tool-result": ACCENT, "reflect": ACCENT, "media": "#7C5CFF",
@@ -62,8 +67,8 @@ export function AgentThoughtNode({ data, selected }: { data: ThoughtNodeData; se
         background: type === "goal" ? `linear-gradient(135deg, rgba(200,255,61,0.06), transparent 70%), ${CARD}` : CARD,
         border: `1px solid ${selected ? ACCENT : LINE}`,
         borderRadius: 12,
-        minWidth: selected ? 210 : 150,
-        maxWidth: selected ? 300 : 250,
+        minWidth: expanded ? 210 : 150,
+        maxWidth: expanded ? 300 : 250,
         fontFamily: "var(--sans)",
         cursor: "pointer",
         boxShadow: selected
@@ -76,10 +81,28 @@ export function AgentThoughtNode({ data, selected }: { data: ThoughtNodeData; se
       {/* Left accent stripe */}
       <div style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: 3, background: stripe, opacity: 0.85 }} />
 
+      {/* Minimize / maximize toggle — persistent per node, independent of selection. */}
+      <button
+        onMouseDown={(e) => e.stopPropagation()}  /* don't start a node drag */
+        onClick={(e) => { e.stopPropagation(); setExpanded(v => !v); }}
+        title={expanded ? "Minimize" : "Expand"}
+        aria-label={expanded ? "Minimize node" : "Expand node"}
+        className="nodrag"
+        style={{
+          position: "absolute", top: 6, right: 6, zIndex: 3,
+          width: 18, height: 18, borderRadius: 5,
+          border: `1px solid ${LINE}`, background: INK_1, color: TEXT2,
+          display: "inline-flex", alignItems: "center", justifyContent: "center",
+          padding: 0, cursor: "pointer",
+        }}
+      >
+        {expanded ? <IconMinus /> : <IconPlus />}
+      </button>
+
       <Handle type="target" position={Position.Top} style={handleStyle(selected)} />
-      {/* Compact by default — full detail only when the node is clicked (selected). */}
-      <div style={{ padding: selected ? "11px 14px 12px 16px" : "9px 12px 9px 14px" }}>
-        {selected ? renderByType(type, content) : <CompactNode type={type} content={content} />}
+      {/* Compact by default — full detail when the node is expanded via its toggle. */}
+      <div style={{ padding: expanded ? "11px 14px 12px 16px" : "9px 28px 9px 14px" }}>
+        {expanded ? renderByType(type, content) : <CompactNode type={type} content={content} />}
       </div>
       <Handle type="source" position={Position.Bottom} style={handleStyle(selected)} />
 
@@ -147,8 +170,12 @@ function compactMeta(type: ThoughtType, content: Record<string, unknown>): Compa
       const proto = protoOf(content.recommended ?? content.protocol);
       const receipt = (content.receiptToken && typeof content.receiptToken === "object")
         ? content.receiptToken as { symbol?: string } : undefined;
+      const conv = Array.isArray(content.convergence) ? content.convergence as Array<{ target?: string; walletCount?: number }> : undefined;
+      const trd  = Array.isArray(content.trades) ? content.trades.length : 0;
       let pill: React.ReactNode = null;
       if (content.txHash || content.submitted === true) pill = <MiniPill text={receipt?.symbol ? `→ ${receipt.symbol}` : "on-chain ✓"} color={ACCENT} />;
+      else if (conv && conv.length > 0)                  pill = <MiniPill text={`🎯 ${conv[0].walletCount}→$${conv[0].target}`} color="#9C8BFF" />;
+      else if (trd > 0)                                  pill = <MiniPill text={`${trd} buys`} color="#9C8BFF" />;
       else if (typeof content.bestApy === "number")      pill = <MiniPill text={`${(content.bestApy as number).toFixed(1)}% APY`} color={ACCENT} />;
       else if (typeof content.riskLevel === "string")    pill = <MiniPill text={`${content.riskLevel} RISK`} color={content.riskLevel === "HIGH" ? WARN : content.riskLevel === "MEDIUM" ? PEND : ACCENT} />;
       else if (content.sent === true)                    pill = <MiniPill text="sent" color="#229ED9" />;
@@ -285,6 +312,13 @@ function ToolResultNode({ content }: { content: Record<string, unknown> }) {
     ? content.receiptToken as { symbol?: string; address?: string; name?: string }
     : undefined;
   const receivedAmount = typeof content.receivedAmount === "string" ? content.receivedAmount : undefined;
+  // Smart-money board (copy-trade): recent whale buys + convergence signal.
+  const whaleTrades = Array.isArray(content.trades)
+    ? (content.trades as Array<{ wallet?: string; symbol?: string; amount?: string; ageMinutes?: number; basescanUrl?: string }>)
+    : undefined;
+  const convergence = Array.isArray(content.convergence)
+    ? (content.convergence as Array<{ target?: string; walletCount?: number }>)
+    : undefined;
 
   return (
     <>
@@ -304,6 +338,31 @@ function ToolResultNode({ content }: { content: Record<string, unknown> }) {
         {riskLevel && (
           <RiskPill level={riskLevel} />
         )}
+
+        {/* 🐋 Smart Money board — recent whale buys + convergence (copy-trade) */}
+        {(whaleTrades?.length || convergence?.length) ? (
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, padding: "8px 10px", borderRadius: 9, background: "rgba(124,92,255,0.07)", border: "1px solid rgba(124,92,255,0.22)" }}>
+            {convergence && convergence.length > 0 && (
+              <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 700, color: "#B9A8FF" }}>
+                🎯 {convergence[0].walletCount} wallets bought <span style={{ color: TEXT }}>${convergence[0].target}</span>
+              </div>
+            )}
+            {whaleTrades && whaleTrades.length > 0 && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                <span style={{ fontSize: 9.5, color: MID, textTransform: "uppercase", letterSpacing: "0.08em" }}>Recent smart-money buys</span>
+                {whaleTrades.slice(0, 4).map((t, i) => (
+                  <a key={i} href={t.basescanUrl} target="_blank" rel="noopener noreferrer"
+                     style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: TEXT2, textDecoration: "none" }}>
+                    <span style={{ fontFamily: "var(--mono, monospace)", color: "#9C8BFF" }}>{(t.wallet ?? "").slice(0, 6)}…</span>
+                    <span style={{ color: MID }}>bought</span>
+                    <span style={{ color: TEXT, fontWeight: 600 }}>{t.amount} {t.symbol}</span>
+                    <span style={{ marginLeft: "auto", color: MID, fontSize: 9.5 }}>{t.ageMinutes}m ↗</span>
+                  </a>
+                ))}
+              </div>
+            )}
+          </div>
+        ) : null}
 
         {(submitted || txHash) && (
           <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 9px", borderRadius: 7, background: "rgba(200,255,61,0.08)", border: "1px solid rgba(200,255,61,0.22)" }}>
@@ -447,5 +506,7 @@ function IconSpark()   { return svg(<><path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 
 function IconQuote()   { return svg(<><path d="M7 8H5a2 2 0 0 0-2 2v3a2 2 0 0 0 2 2h2v-7zM17 8h-2a2 2 0 0 0-2 2v3a2 2 0 0 0 2 2h2V8z" /></>); }
 function IconImage()   { return svg(<><rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="9" cy="9" r="2" /><path d="m21 15-5-5L5 21" /></>); }
 function IconCheck({ size = 14 }: { size?: number }) { return svg(<><path d="M20 6 9 17l-5-5" /></>, size); }
+function IconMinus()   { return svg(<><path d="M5 12h14" /></>, 11); }
+function IconPlus()    { return svg(<><path d="M12 5v14M5 12h14" /></>, 11); }
 
 export default AgentThoughtNode;

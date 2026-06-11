@@ -156,6 +156,12 @@ export interface RelayExecutionParams {
   memo?: string;
   /** Chain to execute on. 8453 = Base (default), 137 = Polygon (Polymarket). */
   chainId?: number;
+  /**
+   * Optional EIP-7702 authorizationList — upgrades an EOA to a smart account
+   * in-flight (the 1Shot track requirement). Built by build7702Authorization();
+   * omitted (and a no-op) once the account already has code.
+   */
+  authorizationList?: unknown[];
 }
 
 export interface RelayExecutionResult {
@@ -192,6 +198,7 @@ export async function executeViaPublicRelayer(
     workAmountUsdc,
     memo = "CLOVE agent execution",
     chainId = BASE_CHAIN_ID,
+    authorizationList,
   } = params;
 
   const chainCfg = RELAYER_CHAINS[chainId] ?? RELAYER_CHAINS[BASE_CHAIN_ID];
@@ -244,6 +251,7 @@ export async function executeViaPublicRelayer(
   const sendParams = {
     chainId: String(chainId),
     ...(feeData.context ? { context: feeData.context } : {}),
+    ...(authorizationList && authorizationList.length > 0 ? { authorizationList } : {}),
     transactions: [{ permissionContext, executions }],
     memo,
   };

@@ -35,9 +35,19 @@ CRITICAL — DO NOT re-ask what the user already told you:
 - If it states risk appetite ("safe", "aggressive", "skip risky") → do NOT ask risk.
 - If it says how to be notified ("Telegram", "voice") → do NOT ask notify.
 - If it says single vs team / "multi-agent" → do NOT ask orchestration.
+- For copy-trader prompts: if it states a minimum trade size ("only buys ≥ 1000 tokens", "min 1000") or a per-trade sizing ("at 1% of my budget", "copy at 5%"), capture them in "prefilled" as minTokenAmount (number) and copyRatio (fraction 0..1, so 1% → 0.01) and do NOT ask about them.
 - If the agent type is obvious from the prompt → do NOT ask agent type.
 Only emit a question when the value genuinely cannot be inferred. If the prompt is
 fully specified, return an EMPTY questions array.
+
+AGENT-TYPE-AWARE QUESTIONS (very important — do not ask irrelevant fields):
+- "protocols" applies ONLY to yield and rebalancer agents. For copy-trader and
+  narrative agents, NEVER ask protocols — they mirror/trade whatever token the
+  signal points to and route swaps through Uniswap/Aerodrome automatically. The
+  protocol field is ignored for these types, so asking it is pure noise.
+- For copy-trader and narrative agents, default to a SINGLE agent. Do NOT ask
+  orchestration unless the user explicitly hinted at a team; if they didn't,
+  put "orchestration": "Single agent" in "prefilled" and skip the question.
 
 Question types available:
 - "single": pick one option

@@ -35,6 +35,21 @@ const CLOVE_AUTO_DEPOSIT_ABI = [
     ],
     outputs: [],
   },
+  // v3 copy-trade: dynamic tokenOut swaps.
+  {
+    name: "forwardSwap", type: "function", stateMutability: "nonpayable",
+    inputs: [
+      { name: "user", type: "address" }, { name: "tokenOut", type: "address" },
+      { name: "fee", type: "uint24" }, { name: "amount", type: "uint256" },
+    ], outputs: [],
+  },
+  {
+    name: "forwardSwapAero", type: "function", stateMutability: "nonpayable",
+    inputs: [
+      { name: "user", type: "address" }, { name: "tokenOut", type: "address" },
+      { name: "amount", type: "uint256" },
+    ], outputs: [],
+  },
   {
     name: "usdcBalance",
     type: "function",
@@ -73,6 +88,47 @@ export interface ReceivedToken {
   name:    string;
   address: `0x${string}`;
   amount:  string;   // human-readable, decimals-adjusted
+}
+
+// ── Operator nonce serialization ────────────────────────────────────────────
+// Every forward()/forwardSwap()/withdraw() is sent by the SAME session EOA. If
+// two fire close together, both fetch the same "latest" nonce and the second
+// reverts with "nonce too low". We (a) serialize sends through a process-level
+// lock and (b) read the PENDING nonce so a still-mempool'd tx is accounted for,
+// with one retry on a nonce error.
+let operatorTxLock: Promise<unknown> = Promise.resolve();
+
+async function sendFromOperator(
+  to:     `0x${string}`,
+  data:   `0x${string}`,
+  gas:    bigint,
+): Promise<`0x${string}`> {
+  // Create the clients here (account bound) so the send is correctly typed and
+  // the nonce read/serialization are colocated.
+  const signer = privateKeyToAccount(getSessionPrivateKey());
+  const wallet = createWalletClient({ account: signer, chain: base, transport: http(RPC) });
+  const pub    = createPublicClient({ chain: base, transport: http(RPC) });
+  const send = operatorTxLock.then(async () => {
+    let lastErr: unknown;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const nonce = await pub.getTransactionCount({ address: signer.address, blockTag: "pending" });
+        return await wallet.sendTransaction({ to, data, gas, nonce });
+      } catch (e) {
+        lastErr = e;
+        const msg = e instanceof Error ? e.message : String(e);
+        if (/nonce/i.test(msg) && attempt < 2) {
+          await new Promise(r => setTimeout(r, 1500)); // let the pending tx settle, refetch nonce
+          continue;
+        }
+        throw e;
+      }
+    }
+    throw lastErr;
+  });
+  // Keep the chain alive regardless of this send's outcome.
+  operatorTxLock = send.then(() => {}, () => {});
+  return send as Promise<`0x${string}`>;
 }
 
 /**
@@ -214,7 +270,7 @@ export async function withdrawFromProtocol(
     gas = (est * 150n) / 100n;
   } catch { /* fall back to generous fixed gas */ }
 
-  const hash = await wallet.sendTransaction({ to: contractAddress, data, gas });
+  const hash = await sendFromOperator(contractAddress, data, gas);
   console.log(`[cloveAutoDeposit] withdraw() tx: ${hash} (gas ${gas})`);
   const receipt = await pub.waitForTransactionReceipt({ hash });
   if (receipt.status !== "success") {
@@ -265,7 +321,7 @@ export async function forwardToProtocol(
     gas = (est * 150n) / 100n;
   } catch { /* protocol may revert estimate; fall back to generous fixed gas */ }
 
-  const hash = await wallet.sendTransaction({ to: contractAddress, data, gas });
+  const hash = await sendFromOperator(contractAddress, data, gas);
   console.log(`[cloveAutoDeposit] forward() tx: ${hash} (gas ${gas})`);
 
   // VERIFY the deposit actually succeeded — waitForTransactionReceipt does NOT
@@ -277,5 +333,51 @@ export async function forwardToProtocol(
   }
   console.log(`[cloveAutoDeposit] Confirmed! Protocol deposit complete.`);
 
+  return hash;
+}
+
+/**
+ * COPY-TRADE v3 — swap USDC (already in the contract) into ANY tokenOut and send
+ * it to the user. Uses the new forwardSwap (Uniswap V3) / forwardSwapAero
+ * (Aerodrome) functions, so the agent can mirror whatever token a whale bought —
+ * not just the hardcoded WETH/AERO of the old forward().
+ *
+ * Requires CLOVE_AUTO_DEPOSIT to point at the v3 contract (with forwardSwap).
+ */
+export async function forwardSwapToken(
+  user:        `0x${string}`,
+  tokenOut:    `0x${string}`,
+  amountAtoms: bigint,
+  useAerodrome = false,
+  fee = 3000,
+): Promise<`0x${string}`> {
+  const contractAddress = process.env.CLOVE_AUTO_DEPOSIT as `0x${string}` | undefined;
+  if (!contractAddress) throw new Error("CLOVE_AUTO_DEPOSIT not set");
+
+  const signer = privateKeyToAccount(getSessionPrivateKey());
+  const wallet = createWalletClient({ account: signer, chain: base, transport: http(RPC) });
+  const pub    = createPublicClient({ chain: base, transport: http(RPC) });
+
+  const arrived = await waitForUsdcBalance(contractAddress, amountAtoms);
+  if (!arrived) throw new Error("[cloveAutoDeposit] USDC did not arrive in contract within 60s");
+
+  const data = useAerodrome
+    ? encodeFunctionData({ abi: CLOVE_AUTO_DEPOSIT_ABI, functionName: "forwardSwapAero", args: [user, tokenOut, amountAtoms] })
+    : encodeFunctionData({ abi: CLOVE_AUTO_DEPOSIT_ABI, functionName: "forwardSwap",     args: [user, tokenOut, fee, amountAtoms] });
+
+  let gas = 900_000n;
+  try {
+    const est = await pub.estimateContractGas(useAerodrome
+      ? { address: contractAddress, abi: CLOVE_AUTO_DEPOSIT_ABI, functionName: "forwardSwapAero", args: [user, tokenOut, amountAtoms], account: signer }
+      : { address: contractAddress, abi: CLOVE_AUTO_DEPOSIT_ABI, functionName: "forwardSwap",     args: [user, tokenOut, fee, amountAtoms], account: signer });
+    gas = (est * 150n) / 100n;
+  } catch { /* swap may revert estimate if no pool — generous fixed gas */ }
+
+  const hash = await sendFromOperator(contractAddress, data, gas);
+  console.log(`[cloveAutoDeposit] forwardSwap(${useAerodrome ? "aero" : "uni"}) → ${tokenOut} tx: ${hash}`);
+  const receipt = await pub.waitForTransactionReceipt({ hash });
+  if (receipt.status !== "success") {
+    throw new Error(`forwardSwap reverted — likely no ${useAerodrome ? "Aerodrome" : "Uniswap"} pool for ${tokenOut} (tx ${hash})`);
+  }
   return hash;
 }

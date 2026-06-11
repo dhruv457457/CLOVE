@@ -59,7 +59,7 @@ function toRelayerJson(v) {
 }
 
 async function main() {
-  const pk = process.env.SPIKE_PK;
+  const pk = process.env.SPIKE_PK ;
   if (!pk) {
     const fresh = generatePrivateKey();
     console.log("No SPIKE_PK set. Throwaway key generated:\n  SPIKE_PK=" + fresh);

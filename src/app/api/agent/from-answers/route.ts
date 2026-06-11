@@ -25,6 +25,9 @@ interface Answers {
   topic?:          string;      // polymarket: market topic to focus on
   wallets?:        string[];    // copy-trader: smart-money wallets to track
   focus?:          string;      // narrative: theme/sector focus
+  minTokenAmount?: number;      // copy-trader: only mirror buys ≥ this many tokens
+  copyRatio?:      number;      // copy-trader: deploy this fraction of budget per copied trade (0..1)
+  copyRules?:      { minTokenAmount?: number; copyRatio?: number };  // copy-trader: structured form answer
   [key: string]:   unknown;
 }
 
@@ -39,7 +42,11 @@ function buildTypeConfig(agentType: AgentType, answers: Answers, prompt: string)
       const fromPrompt  = extractWallets(prompt);
       const wallets     = (fromAnswers.length > 0 ? fromAnswers : fromPrompt)
         .filter((w: string) => /^0x[a-fA-F0-9]{40}$/.test(w));
-      return { wallets };
+      // Copy RULES — "only buys ≥ 1000 tokens, at 1% of my budget". Read straight
+      // from the prompt so the user can just TYPE the conditions; checkWhaleTrades
+      // filters on minTokenAmount and executeCopyTrade sizes by copyRatio × budget.
+      const copyRules = parseCopyRules(prompt, answers);
+      return Object.keys(copyRules).length > 0 ? { wallets, copyRules } : { wallets };
     }
     case "narrative":
       return { focus: answers.focus ?? "Base ecosystem tokens" };
@@ -54,6 +61,55 @@ function buildTypeConfig(agentType: AgentType, answers: Answers, prompt: string)
 function extractWallets(prompt: string): string[] {
   const matches = prompt.match(/0x[a-fA-F0-9]{40}/g) ?? [];
   return [...new Set(matches.map(a => a.toLowerCase()))];
+}
+
+/**
+ * Parse copy-trade RULES from the prompt (+ explicit questionnaire answers):
+ *   minTokenAmount — only mirror buys of at least N tokens (size filter)
+ *   copyRatio      — fraction of budget to deploy per copied trade (0..1)
+ *
+ * Lets the user type "copy 0xfriend, only buys ≥ 1000 tokens, at 1% of my budget"
+ * and have it populate typeConfig.copyRules. Explicit form answers always win.
+ */
+function parseCopyRules(prompt: string, answers: Answers): { minTokenAmount?: number; copyRatio?: number } {
+  const rules: { minTokenAmount?: number; copyRatio?: number } = {};
+
+  // Explicit questionnaire answers take precedence over prompt parsing.
+  const ansMin   = Number(answers.minTokenAmount ?? answers.copyRules?.minTokenAmount);
+  const ansRatio = Number(answers.copyRatio      ?? answers.copyRules?.copyRatio);
+  if (Number.isFinite(ansMin)   && ansMin   > 0) rules.minTokenAmount = ansMin;
+  if (Number.isFinite(ansRatio) && ansRatio > 0) rules.copyRatio = ansRatio > 1 ? ansRatio / 100 : ansRatio;
+
+  const p = prompt.toLowerCase();
+
+  // minTokenAmount — "≥ 1000 tokens", ">= 1000", "at least 1000", "min 1000",
+  // "1000+ tokens", "only buys 1000 tokens". Requires a token/coin/unit noun (or a
+  // strong "at least / ≥ / min" anchor) so it never swallows the USDC budget.
+  if (rules.minTokenAmount === undefined) {
+    const m =
+      p.match(/(?:≥|>=|>|at\s*least|atleast|min(?:imum)?|over|above|more\s*than|larger\s*than|bigger\s*than)\s*\$?\s*([\d,]+(?:\.\d+)?)\s*(?:tokens?|coins?|units?)?/)
+      ?? p.match(/([\d,]+(?:\.\d+)?)\s*\+?\s*(?:tokens?|coins?|units?)\b/);
+    if (m) {
+      const n = Number(m[1].replace(/,/g, ""));
+      if (Number.isFinite(n) && n > 0) rules.minTokenAmount = n;
+    }
+  }
+
+  // copyRatio — "1% of my budget", "at 1%", "5% per trade", "0.5%"; or "ratio 0.01".
+  // A percentage in a copy-trade prompt means "this share of budget per trade".
+  if (rules.copyRatio === undefined) {
+    const pct   = p.match(/(\d+(?:\.\d+)?)\s*%/);
+    const ratio = p.match(/(?:ratio|fraction)\D{0,12}(0?\.\d+)/);
+    if (pct) {
+      const n = Number(pct[1]);
+      if (Number.isFinite(n) && n > 0 && n <= 100) rules.copyRatio = n / 100;
+    } else if (ratio) {
+      const n = Number(ratio[1]);
+      if (Number.isFinite(n) && n > 0 && n <= 1) rules.copyRatio = n;
+    }
+  }
+
+  return rules;
 }
 
 export async function POST(request: NextRequest) {
@@ -504,7 +560,11 @@ export async function POST(request: NextRequest) {
   //
   // RELAYER grant (legacy single-hop) OR any failure: fall back to the parent
   //   context so the spender stays executable (working flow preserved).
-  async function buildSubContext(parentCtx: string, childAgent: Awaited<ReturnType<typeof createAgent>>): Promise<{ context: string; hash: string }> {
+  async function buildSubContext(
+    parentCtx: string,
+    childAgent: Awaited<ReturnType<typeof createAgent>>,
+    opts?: { protocols?: string[]; capUsdc?: number },
+  ): Promise<{ context: string; hash: string }> {
     if (!hasRealPermission || parentCtx === "0xdemo") {
       return { context: "0xdemo", hash: UNSIGNED_HASH };
     }
@@ -515,11 +575,11 @@ export async function POST(request: NextRequest) {
         const chain = await buildRedeemableWorkerChain(
           effectivePermContext!,      // the FM grant is always the chain ROOT
           childAgent.id,
-          workerProtocols,
-          Number(budget),
+          opts?.protocols ?? workerProtocols,
+          opts?.capUsdc ?? Number(budget),
           typeDef.chainId,
         );
-        console.log(`[from-answers] scoped worker chain for ${childAgent.name}: cap ${budget} USDC, targets ${chain.allowedTargets.length}`);
+        console.log(`[from-answers] scoped worker chain for ${childAgent.name}: cap ${opts?.capUsdc ?? budget} USDC, targets ${chain.allowedTargets.length}`);
         return { context: chain.context, hash: chain.scopedHash };
       } catch (e) {
         console.warn("[from-answers] buildRedeemableWorkerChain failed — falling back to root context:", e);
@@ -569,34 +629,57 @@ export async function POST(request: NextRequest) {
     delegationCap:            budget,
   });
 
-  // 4. Executor — performs the on-chain action + reports (cron drives this one).
-  const executor = await createAgent({
-    walletAddress,
-    name:        executorName,
-    goal:        executorGoal,
-    budgetUsdc:  budget,
-    scheduleIntervalMs,  // only the Executor runs on schedule; the rest are invoked around it
-    workflowId:  workflow.id,
-    mediaPolicy,
-    position:    { x: 1320, y: centerY },
-    agentType,
-  });
-  await addAgentToWorkflow(workflow.id, executor.id);
+  // 4. Executor(s) — for yield/rebalancer with MULTIPLE protocols, create ONE
+  //    executor PER PROTOCOL so the Fund Manager can split the budget across them
+  //    with on-chain-enforced per-worker caps. Each starts at an equal split;
+  //    POST /api/workflow/[id]/allocate-budget re-weights them via a Venice
+  //    decision (AI decides the split → the caveat enforces it). Copy-trader and
+  //    single-protocol teams keep one executor.
+  const perProtocol = agentType !== "copy-trader" && workerProtocols.length > 1;
+  const execProtos: (string | null)[] = perProtocol ? workerProtocols : [null];
+  const nExec = execProtos.length;
+  const initialCap = Number((Number(budget) / nExec).toFixed(4)); // equal split to start
 
-  const exCtx = await buildSubContext(rmCtx.context, executor);
-  await setDelegation(executor.id, {
-    parentAgentId:            riskMonitor.id,
-    delegationContext:        exCtx.context,
-    delegationHash:           exCtx.hash,
-    delegationManagerAddress: effectiveDelegationManager ?? "0x",
-    delegationCap:            budget,
-  });
+  const executors: Awaited<ReturnType<typeof createAgent>>[] = [];
+  for (let i = 0; i < nExec; i++) {
+    const proto = execProtos[i];
+    const cap   = perProtocol ? initialCap : Number(budget);
+    const ex = await createAgent({
+      walletAddress,
+      name:        proto ? `${proto.charAt(0).toUpperCase()}${proto.slice(1)} Executor` : executorName,
+      goal:        proto
+        ? `${prompt.trim()} Deposit USDC into ${proto} ONLY, within your on-chain cap of ${cap} USDC. ${scheduleClause} ${notify.includes("Telegram message") ? "Report via Telegram." : ""}`
+        : executorGoal,
+      budgetUsdc:  String(cap),
+      scheduleIntervalMs: i === 0 ? scheduleIntervalMs : undefined,  // one drives the schedule
+      workflowId:  workflow.id,
+      mediaPolicy: i === 0 ? mediaPolicy : "off",
+      position:    { x: 1320, y: SCOUT_Y0 + i * SCOUT_DY },
+      agentType,
+      // Per-protocol yield executors carry their single protocol; copy-trade
+      // executors carry the tracked wallets + copy RULES so checkWhaleTrades /
+      // executeCopyTrade honour minTokenAmount + copyRatio in team mode too.
+      typeConfig:  proto ? { protocols: [proto] }
+        : agentType === "copy-trader" ? buildTypeConfig("copy-trader", answers, prompt)
+        : undefined,
+    });
+    await addAgentToWorkflow(workflow.id, ex.id);
+    const exCtx = await buildSubContext(rmCtx.context, ex, proto ? { protocols: [proto], capUsdc: cap } : undefined);
+    await setDelegation(ex.id, {
+      parentAgentId:            riskMonitor.id,
+      delegationContext:        exCtx.context,
+      delegationHash:           exCtx.hash,
+      delegationManagerAddress: effectiveDelegationManager ?? "0x",
+      delegationCap:            String(cap),
+    });
+    executors.push(ex);
+  }
 
   return NextResponse.json({
-    agents:   [fundManager, ...scouts, analyzer, riskMonitor, executor],
+    agents:   [fundManager, ...scouts, analyzer, riskMonitor, ...executors],
     workflow,
     wired:    true,
-    chain:    `${fundManager.name} → ${scouts.length} scouts → ${analyzer.name} → ${riskMonitor.name} → ${executor.name}`,
+    chain:    `${fundManager.name} → ${scouts.length} scouts → ${analyzer.name} → ${riskMonitor.name} → ${executors.length} executor${executors.length > 1 ? "s" : ""}`,
   });
 }
 

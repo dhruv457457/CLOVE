@@ -236,6 +236,29 @@ contract CloveAutoDeposit {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
+    // COPY-TRADE — dynamic swap into ANY token (v3)
+    //   The original forward() hardcodes USDC→WETH/AERO. These let the copy-trade
+    //   agent mirror a whale into whatever token they actually bought, by passing
+    //   the token's contract address. USDC must already be in this contract.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /** Swap USDC → tokenOut via Uniswap V3 (fee tier; 0 → 3000). Sends tokenOut to user. */
+    function forwardSwap(address user, address tokenOut, uint24 fee, uint256 amount) external onlyOperator {
+        require(user != address(0) && tokenOut != address(0) && amount > 0, "bad args");
+        require(IERC20(USDC).balanceOf(address(this)) >= amount, "Insufficient USDC");
+        _swapUniswap(USDC, tokenOut, fee == 0 ? 3000 : fee, user, amount);
+        emit Deposited(user, "uniswap-copy", amount);
+    }
+
+    /** Swap USDC → tokenOut via Aerodrome (volatile route). Sends tokenOut to user. */
+    function forwardSwapAero(address user, address tokenOut, uint256 amount) external onlyOperator {
+        require(user != address(0) && tokenOut != address(0) && amount > 0, "bad args");
+        require(IERC20(USDC).balanceOf(address(this)) >= amount, "Insufficient USDC");
+        _swapAerodrome(USDC, tokenOut, user, amount);
+        emit Deposited(user, "aerodrome-copy", amount);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
     // Emergency recovery
     // ─────────────────────────────────────────────────────────────────────────
 
