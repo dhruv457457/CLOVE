@@ -1215,6 +1215,7 @@ const loadAgents = useCallback(async () => {
           :                      `🔑 ${permDaysLeft !== null ? `${permDaysLeft}d` : "active"}`}
         </button>
         <SessionAddressChip />
+        <TelegramLinkChip />
         <ConnectChip />
       </header>
 
@@ -2781,6 +2782,97 @@ function ConnectChip() {
     >
       <span style={{ width: 5, height: 5, borderRadius: "50%", background: addr ? ACCENT : MID }} />
       {addr ? `${addr.slice(0, 6)}…${addr.slice(-4)}` : "Connect"}
+    </button>
+  );
+}
+
+function TelegramLinkChip() {
+  const [, setTick] = useState(0);
+  const [linked, setLinked] = useState(false);
+  const [label, setLabel] = useState("Telegram");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    const u = metamaskStore.addListener(() => setTick(x => x + 1));
+    return () => u();
+  }, []);
+
+  const wallet = metamaskStore.getState().userAddress;
+
+  useEffect(() => {
+    if (!wallet) {
+      return;
+    }
+    let cancelled = false;
+    fetch(`/api/telegram/status?wallet=${encodeURIComponent(wallet)}`)
+      .then(r => r.ok ? r.json() : null)
+      .then((d: { linked?: boolean; account?: { username?: string; firstName?: string } } | null) => {
+        if (cancelled) return;
+        setLinked(!!d?.linked);
+        setLabel(d?.linked ? (d.account?.username ? `@${d.account.username}` : d.account?.firstName ?? "Linked") : "Telegram");
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [wallet]);
+
+  const connect = async () => {
+    if (!wallet || busy) return;
+    setBusy(true);
+    try {
+      const res = await fetch("/api/telegram/link-token", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ walletAddress: wallet }),
+      });
+      const data = await res.json() as { deepLink?: string | null; token?: string; error?: string };
+      if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+      if (data.deepLink) {
+        window.open(data.deepLink, "_blank", "noopener,noreferrer");
+      } else if (data.token) {
+        await navigator.clipboard?.writeText(`/start ${data.token}`);
+        setLabel("Token copied");
+      }
+    } catch {
+      setLabel("Link failed");
+      setTimeout(() => setLabel(linked ? "Linked" : "Telegram"), 1800);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const unlink = async () => {
+    if (!wallet || busy) return;
+    setBusy(true);
+    try {
+      await fetch(`/api/telegram/link?wallet=${encodeURIComponent(wallet)}`, { method: "DELETE" });
+      setLinked(false);
+      setLabel("Telegram");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const activeLinked = !!wallet && linked;
+  const displayLabel = wallet ? label : "Telegram";
+
+  return (
+    <button
+      onClick={() => { void (activeLinked ? unlink() : connect()); }}
+      disabled={!wallet || busy}
+      title={activeLinked ? "Unlink Telegram" : "Connect Telegram"}
+      style={{
+        display: "inline-flex", alignItems: "center", gap: 7,
+        padding: "5px 9px", borderRadius: 6,
+        background: activeLinked ? "rgba(200,255,61,0.08)" : "transparent",
+        border: `1px solid ${activeLinked ? "rgba(200,255,61,0.18)" : "transparent"}`,
+        color: activeLinked ? ACCENT : MID_2,
+        fontSize: 11.5, letterSpacing: "0.02em",
+        cursor: wallet && !busy ? "pointer" : "not-allowed",
+        opacity: wallet ? 1 : 0.55,
+      }}
+    >
+      <span style={{ width: 5, height: 5, borderRadius: "50%", background: activeLinked ? ACCENT : MID }} />
+      {busy ? "..." : displayLabel}
     </button>
   );
 }

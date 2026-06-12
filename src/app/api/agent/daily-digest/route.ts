@@ -84,6 +84,8 @@ export async function GET(request: NextRequest) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          walletAddress: agent.walletAddress,
+          agentId: agent.id,
           richReport: {
             text: `*${agent.name} — daily digest*\n\n${insightText}\n\n_${thoughts.length} thought-steps · last 24h_`,
             imageUrl,

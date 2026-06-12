@@ -148,6 +148,9 @@ We'd rather ship less and have it be true.
 **Cut:**
 - ❌ **x402** — our integration only *simulated* settlement (no USDC actually moved). Rather than fake it, we removed it entirely. Venice intel/TTS/image are now free internal calls.
 
+**Known limitations (and the planned fix):**
+- **Swap routing covers Uniswap V3 + Aerodrome (volatile) only.** Before any copy trade, the agent probes for a real pool; a token whose liquidity lives elsewhere (stable pools, other DEXes) is **detected and safely *skipped*, never reverted mid-flow** — funds are never put at risk. The trade-off: deep-but-non-Uniswap tokens (e.g. EURC, which keeps its depth in stable pools) aren't yet copyable. **Planned:** route through a DEX aggregator (0x Swap API / Uniswap Universal Router) so the agent can mirror into *any* liquid token, and use GeckoTerminal for cross-DEX pool discovery. The contract is venue-pluggable by design — this is an executor swap, not an architecture change.
+
 ---
 
 ## Tech stack

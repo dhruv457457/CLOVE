@@ -539,7 +539,7 @@ Return ONLY JSON: { "riskLevel": "LOW"|"MEDIUM"|"HIGH", "safeToExecute": true|fa
       const res = await fetch(`${ctx.baseUrl}/api/notify/telegram`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: args.message }),
+        body: JSON.stringify({ message: args.message, walletAddress: ctx.walletAddress, agentId: ctx.agentId }),
       });
       const data = await res.json();
       return { tool: name, args, result: JSON.stringify({ sent: data.sent }) };

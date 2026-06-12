@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { resolveTelegramChat, sendTelegramMessage, sendTelegramPhoto } from "@/lib/telegram/send";
 
 interface TelegramRequest {
   // Mode 1: plain text only (back-compat)
@@ -19,6 +20,8 @@ interface TelegramRequest {
 
   botToken?: string;
   chatId?:   string;
+  walletAddress?: string;
+  agentId?: string;
 }
 
 function envCreds(body: TelegramRequest) {
@@ -31,6 +34,10 @@ function envCreds(body: TelegramRequest) {
 // ── Senders ─────────────────────────────────────────────────────────────────────
 
 async function sendMessage(botToken: string, chatId: string, text: string) {
+  if (botToken === process.env.TELEGRAM_BOT_TOKEN) {
+    const sent = await sendTelegramMessage(chatId, text);
+    return { ok: sent, json: async () => ({}) } as Response;
+  }
   return fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -39,6 +46,10 @@ async function sendMessage(botToken: string, chatId: string, text: string) {
 }
 
 async function sendPhoto(botToken: string, chatId: string, photoUrl: string, caption?: string) {
+  if (botToken === process.env.TELEGRAM_BOT_TOKEN) {
+    const sent = await sendTelegramPhoto(chatId, photoUrl, caption);
+    return { ok: sent, json: async () => ({}) } as Response;
+  }
   return fetch(`https://api.telegram.org/bot${botToken}/sendPhoto`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -81,11 +92,16 @@ export async function POST(request: NextRequest) {
   try { body = await request.json(); }
   catch { return NextResponse.json({ error: "Invalid body" }, { status: 400 }); }
 
-  const { botToken, chatId } = envCreds(body);
+  const { botToken } = envCreds(body);
+  const chatId = await resolveTelegramChat({
+    chatId: body.chatId,
+    walletAddress: body.walletAddress,
+    agentId: body.agentId,
+  });
   if (!botToken || !chatId) {
     return NextResponse.json({
       sent: false,
-      reason: "Telegram not configured. Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in .env.local.",
+      reason: "Telegram not configured or wallet has no linked Telegram account.",
     });
   }
 
@@ -116,7 +132,7 @@ export async function POST(request: NextRequest) {
       try {
         const r = await sendMessage(botToken, chatId, formatSpending(spending));
         results.spending = r.ok;
-      } catch (e) { results.spending = false; }
+      } catch { results.spending = false; }
     }
 
     return NextResponse.json({ sent: true, parts: results });

@@ -537,6 +537,8 @@ export async function POST(request: NextRequest) {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
+              walletAddress: agent.walletAddress,
+              agentId: agent.id,
               richReport: {
                 text: `*${agent.name}* — ${reflection.insight}`,
                 imageUrl: imageUrl,
@@ -620,6 +622,8 @@ export async function POST(request: NextRequest) {
             method:  "POST",
             headers: { "Content-Type": "application/json" },
             body:    JSON.stringify({
+              walletAddress: agent.walletAddress,
+              agentId: agent.id,
               message: `🚨 *${agent.name}* failed after retries.\n\nError: \`${message.slice(0, 200)}\`\n\nUse \`/resume ${agent.id}\` in Telegram to retry, or open the dashboard.`,
             }),
           });

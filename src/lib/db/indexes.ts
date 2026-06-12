@@ -57,6 +57,11 @@ export async function ensureIndexes(): Promise<void> {
 
       // user_permissions
       db.collection("user_permissions").createIndex({ walletAddress: 1 }, { unique: true }),
+      db.collection("telegram_accounts").createIndex({ telegramUserId: 1 }, { unique: true }),
+      db.collection("telegram_accounts").createIndex({ chatId: 1, status: 1 }),
+      db.collection("telegram_accounts").createIndex({ walletAddress: 1, status: 1 }),
+      db.collection("telegram_link_tokens").createIndex({ tokenHash: 1 }, { unique: true }),
+      db.collection("telegram_link_tokens").createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
 
       // agent_handoffs — A2A coordination audit trail
       db.collection("agent_handoffs").createIndex({ id: 1 }, { unique: true }),

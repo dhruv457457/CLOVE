@@ -190,10 +190,13 @@ async function triggerRevoke(agentId: string, baseUrl: string, reason: Revocatio
 
     // Telegram alert
     try {
+      const revokedAgent = await getAgent(agentId);
       await fetch(`${baseUrl}/api/notify/telegram`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          walletAddress: revokedAgent?.walletAddress,
+          agentId,
           message: `🔒 *Agent delegation revoked*\n\nAgent: \`${agentId}\`\nReason: ${REASON_LABELS[reason]}\n\nThe on-chain delegation has been disabled via DelegationManager.disableDelegation(). Use the dashboard to review and re-grant if needed.`,
         }),
       });
