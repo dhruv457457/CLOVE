@@ -252,6 +252,22 @@ export async function POST(request: NextRequest) {
     }
   } catch { /* non-fatal — default to legacy behaviour */ }
 
+  // grantedTo isn't always available (Telegram /create forwards only the context,
+  // not the grant metadata). Fall back to decoding the grant and checking whether
+  // its leaf delegate is our session EOA — authoritative, and it won't double-wrap
+  // a chain that already terminates at the relayer (whose delegate isn't ours).
+  if (!isFundManagerGrant && effectivePermContext) {
+    try {
+      const { decodeDelegations } = await import("@metamask/smart-accounts-kit/utils");
+      const { getSessionEoaAddress } = await import("@/lib/web3/serverSession");
+      const session = getSessionEoaAddress().toLowerCase();
+      const decoded = decodeDelegations(effectivePermContext as `0x${string}`);
+      isFundManagerGrant = decoded.some(
+        d => String((d as { delegate?: string }).delegate ?? "").toLowerCase() === session,
+      );
+    } catch { /* non-decodable (1Shot hex-JSON) — keep prior value */ }
+  }
+
   const _isRealPerm = !!(
     effectivePermContext &&
     effectiveDelegationManager &&
@@ -279,6 +295,30 @@ export async function POST(request: NextRequest) {
     });
   }
 
+  // A single SPENDING agent needs the same relayer-terminated chain as a
+  // multi-agent worker. Storing the raw FM grant (user → session) makes the
+  // public relayer reject execution at redemption ("first delegation's delegate
+  // must be the relayer target"). Build the scoped chain when we hold an FM
+  // grant; fall back to the raw grant on any failure so nothing regresses.
+  const buildSpendingContext = async (
+    agentId: string,
+    capUsdc: number,
+    protoNames: string[],
+  ): Promise<{ context: string; hash: string }> => {
+    if (isFundManagerGrant && effectivePermContext) {
+      try {
+        const { buildRedeemableWorkerChain } = await import("@/lib/web3/subDelegation");
+        const protos = protoNames.length ? protoNames : ["Morpho", "Aave", "Lido"];
+        const chain = await buildRedeemableWorkerChain(effectivePermContext, agentId, protos, capUsdc, typeDef.chainId);
+        console.log(`[from-answers] scoped single-agent chain for ${agentId}: cap ${capUsdc} USDC, targets ${chain.allowedTargets.length}`);
+        return { context: chain.context, hash: chain.scopedHash };
+      } catch (e) {
+        console.warn("[from-answers] single-agent worker chain failed — root fallback:", e instanceof Error ? e.message : e);
+      }
+    }
+    return { context: effectivePermContext!, hash: "0xpending" };
+  };
+
   // ── Specialized "true agent" archetypes ───────────────────────────────────
   // polymarket / copy-trader / narrative / rebalancer are single autonomous
   // agents with their own tools, chain, and system prompt from the registry.
@@ -303,10 +343,12 @@ export async function POST(request: NextRequest) {
     await addAgentToWorkflow(workflow.id, agent.id);
 
     if (effectivePermContext && effectiveDelegationManager) {
+      const specProtos = agentType === "copy-trader" ? ["uniswap", "aerodrome"] : protocols;
+      const specCtx = await buildSpendingContext(agent.id, Number(budget), specProtos);
       await setDelegation(agent.id, {
         parentAgentId:            null,
-        delegationContext:        effectivePermContext,
-        delegationHash:           "0xpending",
+        delegationContext:        specCtx.context,
+        delegationHash:           specCtx.hash,
         delegationManagerAddress: effectiveDelegationManager,
         delegationCap:            budget,
       });
@@ -336,12 +378,14 @@ export async function POST(request: NextRequest) {
     });
     await addAgentToWorkflow(workflow.id, agent.id);
 
-    // Bind permission — uses stored permission if user already has one
+    // Bind permission — build the relayer-terminated scoped chain (FM grant) so
+    // the single agent can actually execute, instead of storing the raw grant.
     if (effectivePermContext && effectiveDelegationManager) {
+      const singleCtx = await buildSpendingContext(agent.id, Number(budget), protocols);
       await setDelegation(agent.id, {
         parentAgentId:            null,
-        delegationContext:        effectivePermContext,
-        delegationHash:           "0xpending",
+        delegationContext:        singleCtx.context,
+        delegationHash:           singleCtx.hash,
         delegationManagerAddress: effectiveDelegationManager,
         delegationCap:            budget,
       });

@@ -371,20 +371,45 @@ async function createAgentFromTelegram(account: TelegramAccount, prompt: string,
   ].join("\n"));
 }
 
+// Normalize a free-text agent/workflow reference: drop emoji, punctuation, and
+// filler words ("the", "my", "agent"…) so "run the yield hunter" matches
+// "🐋 Yield Hunter". Returns the significant word tokens.
+function nameTokens(s: string): string[] {
+  return s
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\b(the|my|a|an|agent|agents|bot|called|named|please|run|start|execute|team|workflow)\b/g, " ")
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
+/** Fuzzy match: exact id, name-substring, or full token overlap either direction. */
+function bestMatch<T extends { id: string; name: string }>(items: T[], target?: string): T | null {
+  const raw = target?.trim().toLowerCase();
+  if (!raw) return items[0] ?? null;
+  const byId = items.find(i => i.id.toLowerCase() === raw);
+  if (byId) return byId;
+  const exactish = items.find(i => i.name.toLowerCase().includes(raw));
+  if (exactish) return exactish;
+  const needle = nameTokens(raw);
+  if (!needle.length) return items[0] ?? null;
+  return items.find(i => {
+    const name = nameTokens(i.name);
+    if (!name.length) return false;
+    return name.every(w => needle.includes(w)) || needle.every(w => name.includes(w));
+  }) ?? null;
+}
+
 async function resolveAgent(walletAddress: string, target?: string): Promise<Agent | null> {
   const agents = await listAgentsForWallet(walletAddress);
   if (!agents.length) return null;
-  const needle = target?.trim().toLowerCase();
-  if (!needle) return agents[0] ?? null;
-  return agents.find(a => a.id.toLowerCase() === needle || a.name.toLowerCase().includes(needle)) ?? null;
+  return bestMatch(agents, target);
 }
 
 async function resolveWorkflow(walletAddress: string, target?: string): Promise<Workflow | null> {
   const workflows = await listWorkflowsForWallet(walletAddress);
   if (!workflows.length) return null;
-  const needle = target?.trim().toLowerCase();
-  if (!needle) return workflows[0] ?? null;
-  return workflows.find(w => w.id.toLowerCase() === needle || w.name.toLowerCase().includes(needle)) ?? null;
+  return bestMatch(workflows, target);
 }
 
 async function drainStream(stream: ReadableStream<Uint8Array>) {
