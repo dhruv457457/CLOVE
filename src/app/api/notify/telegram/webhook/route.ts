@@ -79,18 +79,34 @@ export async function POST(request: NextRequest) {
     }
 
     const intent = parseTelegramIntent(text);
+    // Self-calls (run-stream, from-answers) must hit the LOCAL server, not the
+    // public domain — a container fetching its own public URL hairpin-fails on
+    // Railway ("fetch failed"). Mirror the internal scheduler's loopback base.
+    const selfBase = internalBase(request.nextUrl.origin);
     // Runs take ~70s+ — reply fast and execute in the background so Telegram
     // doesn't time out and retry (which would double-run the agent on-chain).
     if (intent.type === "run_agent" || intent.type === "run_workflow") {
-      void handleIntent(account, intent, request.nextUrl.origin).catch(() => {});
+      void handleIntent(account, intent, selfBase).catch(() => {});
       return NextResponse.json({ ok: true });
     }
-    await handleIntent(account, intent, request.nextUrl.origin);
+    await handleIntent(account, intent, selfBase);
   } catch (e) {
     await reply(chatId, `Error: ${escapeTelegramMd(e instanceof Error ? e.message : String(e))}`).catch(() => {});
   }
 
   return NextResponse.json({ ok: true });
+}
+
+/**
+ * Base URL for self-calls. A container fetching its own PUBLIC domain hairpin-fails
+ * on Railway, so internal route calls must hit the local server directly — exactly
+ * what the internal scheduler does (127.0.0.1:PORT). Falls back to the request
+ * origin in dev where PORT isn't set (origin is already http://localhost:3000).
+ */
+function internalBase(origin: string): string {
+  if (process.env.INTERNAL_BASE_URL) return process.env.INTERNAL_BASE_URL;
+  const port = process.env.PORT;
+  return port ? `http://127.0.0.1:${port}` : origin;
 }
 
 async function handleStart(input: {

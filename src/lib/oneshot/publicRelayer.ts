@@ -261,12 +261,28 @@ export async function executeViaPublicRelayer(
   // Set PUBLIC_BASE_URL on an always-on host (Railway) to enable it — locally it
   // stays unset and we just poll. The push is a *nudge* to re-check, never trusted
   // as authoritative (we always re-read relayer_getStatus on wake).
-  const publicBase = process.env.PUBLIC_BASE_URL;
+  // Only attach destinationUrl if PUBLIC_BASE_URL resolves to a real http(s) URL.
+  // A bare domain (no scheme) makes the relayer reject the whole tx with
+  // "destinationUrl is not a valid URL" — so we validate and silently fall back
+  // to polling when it's missing or malformed.
+  let destinationUrl: string | undefined;
+  const publicBase = process.env.PUBLIC_BASE_URL?.trim();
+  if (publicBase) {
+    const candidate = `${publicBase.replace(/\/$/, "")}/api/relay/webhook`;
+    try {
+      const u = new URL(candidate);
+      if (u.protocol === "http:" || u.protocol === "https:") destinationUrl = candidate;
+      else console.warn(`[publicRelayer] PUBLIC_BASE_URL has non-http(s) scheme, ignoring webhook nudge: ${publicBase}`);
+    } catch {
+      console.warn(`[publicRelayer] PUBLIC_BASE_URL is not a valid URL (need https://…), ignoring webhook nudge: ${publicBase}`);
+    }
+  }
+
   const sendParams = {
     chainId: String(chainId),
     ...(feeData.context ? { context: feeData.context } : {}),
     ...(authorizationList && authorizationList.length > 0 ? { authorizationList } : {}),
-    ...(publicBase ? { destinationUrl: `${publicBase.replace(/\/$/, "")}/api/relay/webhook` } : {}),
+    ...(destinationUrl ? { destinationUrl } : {}),
     transactions: [{ permissionContext, executions }],
     memo,
   };
