@@ -45,6 +45,8 @@ export async function POST(req: NextRequest) {
   const message  = String(body.message ?? "").trim();
   const wallet   = String(body.walletAddress ?? "").trim();
   const threadId = String((body as { threadId?: unknown }).threadId ?? "").trim();
+  const source: "web" | "telegram" =
+    (body as { source?: unknown }).source === "telegram" ? "telegram" : "web";
   if (!message) return NextResponse.json({ error: "message required" }, { status: 400 });
 
   // Prior turns for continuity within THIS thread (shared with Telegram via the
@@ -111,8 +113,8 @@ export async function POST(req: NextRequest) {
 
   // Persist both turns (fire-and-forget; only with a wallet + thread to key on).
   if (wallet && threadId) {
-    const userTurn: ChatMessage      = { role: "user",      content: message, ts: new Date().toISOString(), source: "web" };
-    const assistantTurn: ChatMessage = { role: "assistant", content: reply,   ts: new Date().toISOString(), source: "web" };
+    const userTurn: ChatMessage      = { role: "user",      content: message, ts: new Date().toISOString(), source };
+    const assistantTurn: ChatMessage = { role: "assistant", content: reply,   ts: new Date().toISOString(), source };
     void appendMessages(wallet, threadId, [userTurn, assistantTurn]);
   }
 

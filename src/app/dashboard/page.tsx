@@ -23,6 +23,8 @@ import {
 import { metamaskStore } from "@/lib/web3/metamaskStore";
 import type { MediaPolicy } from "@/lib/agent/agents";
 import ChatPanel from "@/components/ChatPanel";
+import DelegationChainPanel from "@/components/DelegationChainPanel";
+import PortfolioPanel from "@/components/PortfolioPanel";
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Design tokens
@@ -1005,7 +1007,6 @@ const loadAgents = useCallback(async () => {
           : permExpirySoon     ? `🔑 ${permDaysLeft}d left`
           :                      `🔑 ${permDaysLeft !== null ? `${permDaysLeft}d` : "active"}`}
         </button>
-        <SessionAddressChip />
         <TelegramLinkChip />
         <ConnectChip />
       </header>
@@ -1582,6 +1583,16 @@ function HistoryDrawer({
             </div>
           )}
         </div>
+      </div>
+
+      {/* #5: on-chain delegation chain (user → session → THIS AGENT → relayer) */}
+      <div style={{ padding: "12px 16px", borderBottom: `1px solid ${LINE}` }}>
+        <DelegationChainPanel agentId={agent.id} />
+      </div>
+
+      {/* #2: portfolio behaviour + recent moves (what the agent did to positions) */}
+      <div style={{ padding: "12px 16px", borderBottom: `1px solid ${LINE}` }}>
+        <PortfolioPanel />
       </div>
 
       {/* Thoughts — UX-4: Basescan links + cost chips */}
@@ -2285,26 +2296,61 @@ function NavItem({ icon: Icon, label, active, count, onClick }: { icon: React.Co
 
 function ConnectChip() {
   const [, setTick] = useState(0);
+  const [open, setOpen] = useState(false);
   useEffect(() => {
     const u = metamaskStore.addListener(() => setTick(x => x + 1));
     return () => u();
   }, []);
   const addr = metamaskStore.getState().userAddress;
+
   return (
-    <button
-      onClick={() => { if (!addr) void metamaskStore.connect(); }}
-      style={{
-        display: "inline-flex", alignItems: "center", gap: 7,
-        padding: "5px 9px", borderRadius: 6,
-        background: "transparent", border: "none",
-        color: MID_2, fontSize: 11.5, letterSpacing: "0.02em",
-        fontVariantNumeric: "tabular-nums",
-        cursor: "pointer",
-      }}
-    >
-      <span style={{ width: 5, height: 5, borderRadius: "50%", background: addr ? ACCENT : MID }} />
-      {addr ? `${addr.slice(0, 6)}…${addr.slice(-4)}` : "Connect"}
-    </button>
+    <div style={{ position: "relative" }}>
+      <button
+        onClick={() => { if (!addr) void metamaskStore.connect(); else setOpen(o => !o); }}
+        title={addr ? "Account options" : "Connect MetaMask"}
+        style={{
+          display: "inline-flex", alignItems: "center", gap: 7,
+          padding: "5px 9px", borderRadius: 6,
+          background: "transparent", border: "none",
+          color: MID_2, fontSize: 11.5, letterSpacing: "0.02em",
+          fontVariantNumeric: "tabular-nums",
+          cursor: "pointer",
+        }}
+      >
+        <span style={{ width: 5, height: 5, borderRadius: "50%", background: addr ? ACCENT : MID }} />
+        {addr ? `${addr.slice(0, 6)}…${addr.slice(-4)}` : "Connect"}
+        {addr && <ChevronDown size={11} style={{ opacity: 0.6 }} />}
+      </button>
+
+      {addr && open && (
+        <>
+          <div onClick={() => setOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 40 }} />
+          <div
+            style={{
+              position: "absolute", top: "100%", right: 0, marginTop: 6, zIndex: 41,
+              minWidth: 180, background: INK_1, border: `1px solid ${LINE_MID}`, borderRadius: 9,
+              padding: 6, boxShadow: "0 12px 30px -10px rgba(0,0,0,0.6)",
+            }}
+          >
+            <div style={{ padding: "5px 8px", fontSize: 11, color: MID, fontVariantNumeric: "tabular-nums" }}>
+              {addr.slice(0, 10)}…{addr.slice(-8)}
+            </div>
+            <button
+              onClick={() => { metamaskStore.disconnect(); setOpen(false); }}
+              style={{
+                display: "flex", width: "100%", alignItems: "center", gap: 7,
+                padding: "7px 8px", borderRadius: 7, border: "none", cursor: "pointer",
+                background: "transparent", color: "#FF8A66", fontSize: 12, textAlign: "left",
+              }}
+              onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(255,138,102,0.08)"; }}
+              onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
+            >
+              Disconnect wallet
+            </button>
+          </div>
+        </>
+      )}
+    </div>
   );
 }
 

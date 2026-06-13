@@ -175,7 +175,31 @@ async function handleIntent(account: TelegramAccount, intent: TelegramIntent, or
     case "create_agent":
       return createAgentFromTelegram(account, intent.prompt, origin);
     case "unknown":
-      return reply(account.chatId, `I did not understand that yet. Try /help.`);
+      // Free-form natural language → the shared chat engine (#2). Same /api/chat
+      // the web uses, on a stable per-wallet "telegram" thread, so web + Telegram
+      // share one conversation (visible in the web "Past chats" list) and the bot
+      // answers with memory + the user's real agent roster.
+      return chatViaTelegram(account, intent.text ?? "", origin);
+  }
+}
+
+async function chatViaTelegram(account: TelegramAccount, text: string, origin: string) {
+  if (!text.trim()) return reply(account.chatId, "Say something, or try /help for commands.");
+  try {
+    const res = await fetch(`${origin}/api/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: text,
+        walletAddress: account.walletAddress,
+        threadId: "telegram",     // stable shared thread per wallet
+        source: "telegram",
+      }),
+    });
+    const data = await res.json().catch(() => ({})) as { reply?: string };
+    return reply(account.chatId, data.reply ?? "I couldn't reach my reasoning model — try again.");
+  } catch {
+    return reply(account.chatId, "I couldn't reach my reasoning model — try again.");
   }
 }
 
