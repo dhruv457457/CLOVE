@@ -22,6 +22,7 @@ import {
 } from "lucide-react";
 import { metamaskStore } from "@/lib/web3/metamaskStore";
 import type { MediaPolicy } from "@/lib/agent/agents";
+import ChatPanel from "@/components/ChatPanel";
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Design tokens
@@ -523,11 +524,6 @@ export default function DashboardPage() {
   const [selectedAgentData,  setSelectedAgentData]  = useState<Agent | null>(null);
   const [drawerOpen,         setDrawerOpen]         = useState(false);
 
-  // Fix 4: security scanner
-  const [scanFindings,  setScanFindings]  = useState<SecurityFinding[] | null>(null);
-  const [scanOpen,      setScanOpen]      = useState(false);
-  const [scanning,      setScanning]      = useState(false);
-
   // One-click team run (orchestrate the whole workflow from the canvas)
   const [teamRunning,   setTeamRunning]   = useState(false);
 
@@ -842,18 +838,6 @@ const loadAgents = useCallback(async () => {
     }
   }, [agents, loadAgents, toast]);
 
-  // Fix 4: run scan (async — checks Telegram status server-side)
-  const runScan = useCallback(async () => {
-    setScanning(true);
-    try {
-      const findings = await runSecurityScanAsync(agents);
-      setScanFindings(findings);
-      setScanOpen(true);
-    } finally {
-      setScanning(false);
-    }
-  }, [agents]);
-
   // One-click "Run Team": jump to the workflow's live A2A view and auto-start
   // the orchestrated run (Scouts → Analyzer → Risk → Executor). The workflow
   // page renders the real-time timeline, agent thoughts, decision, and the
@@ -961,10 +945,13 @@ const loadAgents = useCallback(async () => {
   // Floating bar: ask Venice for ONLY the still-missing questions. If the prompt
   // is fully specified (no questions), create immediately; else open the modal
   // pre-filled with whatever was already extracted.
-  const submitNlPrompt = useCallback(async () => {
+  // Core create flow shared by the floating Create bar AND the chat confirm card
+  // (Phase 2). Asks Venice for only the still-missing questions; if the prompt is
+  // fully specified it builds immediately, else it opens the questionnaire modal.
+  const startCreateFlow = useCallback(async (rawPrompt: string) => {
     const wallet = metamaskStore.getState().userAddress;
-    if (!wallet || !nlPrompt.trim()) return;
-    const prompt = nlPrompt.trim();
+    const prompt = rawPrompt.trim();
+    if (!wallet || !prompt) return;
     setNlSubmitting(true);
     try {
       const res = await fetch("/api/agent/questions", {
@@ -1000,7 +987,9 @@ const loadAgents = useCallback(async () => {
     } finally {
       setNlSubmitting(false);
     }
-  }, [nlPrompt, createFromAnswers, loadAgents]);
+  }, [createFromAnswers, loadAgents]);
+
+  const submitNlPrompt = useCallback(() => startCreateFlow(nlPrompt), [nlPrompt, startCreateFlow]);
 
   // Submit questionnaire answers → reuse the shared creation path.
   const submitQuestionnaire = useCallback(async () => {
@@ -1023,11 +1012,6 @@ const loadAgents = useCallback(async () => {
     ? Math.max(0, Math.floor((permExpiresAt - Date.now() / 1000) / 86400))
     : null;
   const permExpirySoon = permDaysLeft !== null && permDaysLeft < 14;
-
-  // Scan badge counts
-  const critHighCount = scanFindings
-    ? scanFindings.filter(f => f.severity === "critical" || f.severity === "high").length
-    : 0;
 
   return (
     <div
@@ -1166,26 +1150,6 @@ const loadAgents = useCallback(async () => {
           {teamRunning ? "▶ Running…" : "▶ Run Team"}
         </button>
 
-        {/* Fix 4: Scan button */}
-        <button
-          onClick={runScan}
-          disabled={scanning}
-          style={{
-            display: "inline-flex", alignItems: "center", gap: 6,
-            padding: "5px 10px", borderRadius: 6,
-            background: critHighCount > 0 ? "rgba(255,69,69,0.1)" : "rgba(244,241,234,0.05)",
-            border: `1px solid ${critHighCount > 0 ? "rgba(255,69,69,0.3)" : LINE_MID}`,
-            color: critHighCount > 0 ? "#FF4545" : TEXT2,
-            fontSize: 11.5, cursor: scanning ? "not-allowed" : "pointer",
-            opacity: scanning ? 0.6 : 1,
-          }}
-        >
-          <Shield size={12} />
-          {scanFindings && critHighCount > 0
-            ? `${critHighCount} issue${critHighCount !== 1 ? "s" : ""}`
-            : "Scan"}
-        </button>
-
         {/* Permission button — ALWAYS visible (IMP-3: shows expiry countdown) */}
         <button
           onClick={() => setPermGrantOpen(true)}
@@ -1237,8 +1201,12 @@ const loadAgents = useCallback(async () => {
           <FitViewOnLoad nodeCount={nodes.length} />
         </ReactFlow>
 
-        {agents.length === 0 && (
-          <EmptyState onCreate={openCreate} />
+        {/* Phase 1/2b: chat is the front door (hero) with no agents, and docks
+            into a collapsible left rail beside the canvas once agents exist. */}
+        {agents.length === 0 ? (
+          <ChatPanel mode="hero" onCreate={openCreate} onConfirmCreate={startCreateFlow} />
+        ) : (
+          <ChatPanel mode="docked" onCreate={openCreate} onConfirmCreate={startCreateFlow} />
         )}
 
         {/* Single, centered Create panel — replaces the old thin floating bar */}
@@ -1301,15 +1269,6 @@ const loadAgents = useCallback(async () => {
         />
       )}
 
-      {/* Fix 4: Security scan modal */}
-      {scanOpen && scanFindings && (
-        <SecurityScanModal
-          findings={scanFindings}
-          agents={agents}
-          onClose={() => setScanOpen(false)}
-          onRefresh={async () => { await loadAgents(); setScanOpen(false); }}
-        />
-      )}
 
       {/* Questionnaire modal */}
       {questionnaire && (
@@ -2874,46 +2833,6 @@ function TelegramLinkChip() {
       <span style={{ width: 5, height: 5, borderRadius: "50%", background: activeLinked ? ACCENT : MID }} />
       {busy ? "..." : displayLabel}
     </button>
-  );
-}
-
-function EmptyState({ onCreate }: { onCreate: () => void }) {
-  const [, setTick] = useState(0);
-  useEffect(() => {
-    const u = metamaskStore.addListener(() => setTick(x => x + 1));
-    return () => u();
-  }, []);
-  const connected = metamaskStore.getState().userAddress;
-  return (
-    <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 16, pointerEvents: "none", paddingBottom: 100 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: MID, letterSpacing: "0.1em", textTransform: "uppercase" }}>
-        <Sparkles size={14} style={{ color: ACCENT }} /> {connected ? "No workflows yet" : "Wallet not connected"}
-      </div>
-      <div style={{ fontSize: 30, color: TEXT, fontFamily: "var(--serif)", fontStyle: "italic", letterSpacing: "-0.02em", textAlign: "center" }}>
-        {connected ? "Create your first workflow." : "Connect a wallet to begin."}
-      </div>
-      <div style={{ fontSize: 13, color: TEXT2, maxWidth: "44ch", textAlign: "center", lineHeight: 1.5 }}>
-        {connected
-          ? "Describe what you want in plain English. CLOVE will ask clarifying questions and assemble a team of agents to do it autonomously."
-          : "Click Connect in the top bar to grant CLOVE access to your wallet (read-only until you grant a permission)."}
-      </div>
-      {connected && (
-        <button
-          onClick={onCreate}
-          style={{
-            pointerEvents: "auto",
-            display: "inline-flex", alignItems: "center", gap: 9,
-            padding: "11px 20px", borderRadius: 999,
-            background: ACCENT, color: INK,
-            border: "none", fontWeight: 600, fontSize: 13.5, cursor: "pointer",
-            marginTop: 4,
-            boxShadow: `0 8px 28px -10px ${ACCENT_GLOW}`,
-          }}
-        >
-          <Plus size={14} strokeWidth={2.5} /> New workflow
-        </button>
-      )}
-    </div>
   );
 }
 
