@@ -79,12 +79,6 @@ function scheduleLabel(ms?: number): string | null {
   return `${Math.round(h)}h`;
 }
 
-interface SecurityFinding {
-  severity: "critical" | "high" | "medium" | "info";
-  agentName: string;
-  issue: string;
-  fix: string;
-}
 
 interface Question {
   id: string;
@@ -380,126 +374,6 @@ function AgentNode({
 // NODE_TYPES must be defined outside component for performance
 const NODE_TYPES: NodeTypes = { agent: AgentNode };
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  Fix 4: Security scanner
-// ─────────────────────────────────────────────────────────────────────────────
-
-async function runSecurityScanAsync(agents: Agent[]): Promise<SecurityFinding[]> {
-  // Check Telegram config server-side (env var is not visible to client)
-  let telegramConfigured = false;
-  try {
-    const r = await fetch("/api/notify/telegram/status");
-    if (r.ok) telegramConfigured = ((await r.json()) as { configured: boolean }).configured;
-  } catch { /* non-fatal */ }
-
-  return runSecurityScan(agents, telegramConfigured);
-}
-
-function runSecurityScan(agents: Agent[], telegramConfigured = false): SecurityFinding[] {
-  const findings: SecurityFinding[] = [];
-
-  // Build id->agent map for chain walking
-  const byId = new Map<string, Agent>(agents.map(a => [a.id, a]));
-
-  for (const a of agents) {
-    // 1. Demo delegation
-    if (a.delegationStatus !== "active" || a.delegationHash?.includes("demo")) {
-      findings.push({
-        severity: "medium",
-        agentName: a.name,
-        issue: "Agent runs in demo mode — no real on-chain delegation.",
-        fix: "Grant ERC-7715 permission via MetaMask on this agent.",
-      });
-    }
-
-    // 2. Root agent with no delegation context
-    if (!a.parentAgentId && !a.delegationContext) {
-      findings.push({
-        severity: "high",
-        agentName: a.name,
-        issue: "Root agent has no permission context. Cannot execute real transactions.",
-        fix: "Open the agent, click 'Grant ERC-7715 permission', approve in MetaMask.",
-      });
-    }
-
-    // 3. Over-budget cap
-    if (a.delegationCap) {
-      const cap    = parseFloat(a.delegationCap);
-      const budget = parseFloat(a.budgetUsdc);
-      if (!isNaN(cap) && !isNaN(budget) && cap > budget * 1.1) {
-        findings.push({
-          severity: "critical",
-          agentName: a.name,
-          issue: `Delegation cap (${a.delegationCap} USDC) exceeds agent budget by >10%.`,
-          fix: "Lower the delegation cap to match or be below the agent budget.",
-        });
-      }
-    }
-
-    // 4. Revoked delegation
-    if (a.delegationStatus === "revoked") {
-      findings.push({
-        severity: "info",
-        agentName: a.name,
-        issue: "Agent delegation was revoked. It cannot execute until re-delegated.",
-        fix: "Re-grant ERC-7715 permission or remove this agent.",
-      });
-    }
-
-    // 5. Deep delegation chain
-    let depth = 0;
-    let cur = a;
-    const visited = new Set<string>();
-    while (cur.parentAgentId && !visited.has(cur.id)) {
-      visited.add(cur.id);
-      depth++;
-      const parent = byId.get(cur.parentAgentId);
-      if (!parent) break;
-      cur = parent;
-    }
-    if (depth > 3) {
-      findings.push({
-        severity: "medium",
-        agentName: a.name,
-        issue: `Delegation chain depth ${depth}. Each hop reduces ERC-7710 redemption reliability.`,
-        fix: "Flatten the delegation hierarchy to 3 levels or fewer.",
-      });
-    }
-
-    // 6. Budget >90% used
-    if (a.budgetUsedUsdc && a.budgetUsdc) {
-      const used   = parseFloat(a.budgetUsedUsdc);
-      const budget = parseFloat(a.budgetUsdc);
-      if (!isNaN(used) && !isNaN(budget) && budget > 0 && used / budget > 0.9) {
-        findings.push({
-          severity: "high",
-          agentName: a.name,
-          issue: `Budget ${Math.round((used / budget) * 100)}% utilized. Agent may fail on next execution attempt.`,
-          fix: "Top up the agent's USDC budget or reduce its cap.",
-        });
-      }
-    }
-  }
-
-  // 7. Telegram — only warn if NOT configured
-  if (!telegramConfigured) {
-    findings.push({
-      severity: "high",
-      agentName: "Global",
-      issue: "TELEGRAM_BOT_TOKEN not set — agents cannot send reports.",
-      fix: "Add TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID to your .env.local and restart.",
-    });
-  }
-
-  return findings;
-}
-
-const SEVERITY_COLOR: Record<SecurityFinding["severity"], string> = {
-  critical: "#FF4545",
-  high:     "#FF8A66",
-  medium:   "#FFD166",
-  info:     MID,
-};
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Dashboard page
@@ -527,9 +401,6 @@ export default function DashboardPage() {
   // One-click team run (orchestrate the whole workflow from the canvas)
   const [teamRunning,   setTeamRunning]   = useState(false);
 
-  // Fix 3A: floating prompt bar
-  const [nlPrompt,     setNlPrompt]     = useState("");
-  const [nlSubmitting, setNlSubmitting] = useState(false);
 
   // Questionnaire state
   const [questionnaire,    setQuestionnaire]    = useState<Questionnaire | null>(null);
@@ -544,11 +415,11 @@ export default function DashboardPage() {
   // Schedule modal — opened from agent card clock chip
   const [scheduleAgent,    setScheduleAgent]    = useState<Agent | null>(null);
 
-  // New Workflow modal — the primary creation flow
-  // Single creation entry point = a centered Create panel. "New workflow" + the
-  // empty-state CTA open it (works regardless of whether the canvas has agents).
-  const [createOpen, setCreateOpen] = useState(false);
-  const openCreate = useCallback(() => setCreateOpen(true), []);
+  // "New workflow" opens a fresh full-screen chat (blank canvas + empty chat)
+  // instead of the old prompt panel. newChatNonce bumps ChatPanel into a new thread.
+  const [newChatMode, setNewChatMode] = useState(false);
+  const [newChatNonce, setNewChatNonce] = useState(0);
+  const startNewChat = useCallback(() => { setNewChatNonce(n => n + 1); setNewChatMode(true); }, []);
   const [deletingWf, setDeletingWf] = useState(false);
 
   // UX-1: In-UI toast system — replaces all alert()/confirm() calls
@@ -875,6 +746,7 @@ const loadAgents = useCallback(async () => {
       const data = await res.json() as { agents: unknown[]; wired: boolean; chain?: string; workflow?: { id?: string } };
       setQuestionnaire(null);
       setAnswers({});
+      setNewChatMode(false);   // built from a new-workflow chat → reveal the canvas
       // Switch the Hub canvas to the freshly created workflow so it shows ONLY
       // the new team — previous workflows move out of view (still in History).
       if (data.workflow?.id) setActiveWorkflowId(data.workflow.id);
@@ -945,51 +817,6 @@ const loadAgents = useCallback(async () => {
   // Floating bar: ask Venice for ONLY the still-missing questions. If the prompt
   // is fully specified (no questions), create immediately; else open the modal
   // pre-filled with whatever was already extracted.
-  // Core create flow shared by the floating Create bar AND the chat confirm card
-  // (Phase 2). Asks Venice for only the still-missing questions; if the prompt is
-  // fully specified it builds immediately, else it opens the questionnaire modal.
-  const startCreateFlow = useCallback(async (rawPrompt: string) => {
-    const wallet = metamaskStore.getState().userAddress;
-    const prompt = rawPrompt.trim();
-    if (!wallet || !prompt) return;
-    setNlSubmitting(true);
-    try {
-      const res = await fetch("/api/agent/questions", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt }),
-      });
-      if (!res.ok) throw new Error("Questions API failed");
-      const data = await res.json() as { summary: string; questions: Question[]; prefilled?: Record<string, unknown> };
-      // Merge extracted values + slider defaults for any question still asked.
-      const merged: Record<string, unknown> = { ...(data.prefilled ?? {}) };
-      for (const q of data.questions) {
-        if (q.type === "slider" && merged[q.id] === undefined) merged[q.id] = q.defaultVal ?? q.min ?? 10;
-      }
-      setNlPrompt("");
-      if (!data.questions || data.questions.length === 0) {
-        await createFromAnswers(prompt, merged);     // fully specified → just build it
-      } else {
-        setAnswers(merged);
-        setQuestionnaire({ ...data, originalPrompt: prompt });
-      }
-    } catch {
-      const wallet2 = metamaskStore.getState().userAddress;
-      if (wallet2) {
-        await fetch("/api/agent", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ walletAddress: wallet2, name: "Strategy Agent", goal: prompt, budgetUsdc: "10" }),
-        });
-        await loadAgents();
-        setNlPrompt("");
-      }
-    } finally {
-      setNlSubmitting(false);
-    }
-  }, [createFromAnswers, loadAgents]);
-
-  const submitNlPrompt = useCallback(() => startCreateFlow(nlPrompt), [nlPrompt, startCreateFlow]);
 
   // Submit questionnaire answers → reuse the shared creation path.
   const submitQuestionnaire = useCallback(async () => {
@@ -1034,7 +861,7 @@ const loadAgents = useCallback(async () => {
 
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
           <button
-            onClick={openCreate}
+            onClick={startNewChat}
             style={{
               display: "flex", alignItems: "center", justifyContent: "center", gap: 9,
               padding: "10px 12px", borderRadius: 9,
@@ -1203,21 +1030,20 @@ const loadAgents = useCallback(async () => {
 
         {/* Phase 1/2b: chat is the front door (hero) with no agents, and docks
             into a collapsible left rail beside the canvas once agents exist. */}
-        {agents.length === 0 ? (
-          <ChatPanel mode="hero" onCreate={openCreate} onConfirmCreate={startCreateFlow} />
+        {newChatMode ? (
+          // New workflow → blank canvas + fresh empty chat (full overlay).
+          <div className="clove-fade-in" style={{ position: "absolute", inset: 0, background: INK, zIndex: 20 }}>
+            <ChatPanel
+              mode="hero"
+              newChatNonce={newChatNonce}
+              onConfirmCreate={createFromAnswers}
+              onClose={() => setNewChatMode(false)}
+            />
+          </div>
+        ) : agents.length === 0 ? (
+          <ChatPanel mode="hero" newChatNonce={newChatNonce} onConfirmCreate={createFromAnswers} />
         ) : (
-          <ChatPanel mode="docked" onCreate={openCreate} onConfirmCreate={startCreateFlow} />
-        )}
-
-        {/* Single, centered Create panel — replaces the old thin floating bar */}
-        {createOpen && (
-          <CreatePanel
-            value={nlPrompt}
-            onChange={setNlPrompt}
-            onSubmit={() => { setCreateOpen(false); submitNlPrompt(); }}
-            onClose={() => setCreateOpen(false)}
-            submitting={nlSubmitting}
-          />
+          <ChatPanel mode="docked" newChatNonce={newChatNonce} onConfirmCreate={createFromAnswers} />
         )}
 
         {/* Fix 3C: Right history drawer */}
@@ -1681,99 +1507,6 @@ const NL_PRESET_GROUPS: Array<{ category: string; icon: string; examples: string
 
 const NL_PRESETS = NL_PRESET_GROUPS.flatMap(g => g.examples);
 
-function CreatePanel({
-  value, onChange, onSubmit, onClose, submitting,
-}: {
-  value: string;
-  onChange: (v: string) => void;
-  onSubmit: () => void;
-  onClose: () => void;
-  submitting: boolean;
-}) {
-  // One representative example per category, as quick-fill chips.
-  const examples = NL_PRESET_GROUPS.flatMap(g => g.examples.slice(0, 1).map(ex => ({ icon: g.icon, category: g.category, ex })));
-  return (
-    <div
-      style={{
-        position: "fixed", top: 0, right: 0, bottom: 0, zIndex: 600,
-        width: "min(440px, 94vw)", background: INK_1, borderLeft: `1px solid ${LINE_MID}`,
-        boxShadow: "-16px 0 56px -20px rgba(0,0,0,0.75)",
-        padding: 24, overflowY: "auto",
-        display: "flex", flexDirection: "column", gap: 16,
-        animation: "slideInRight 0.18s cubic-bezier(.2,.85,.25,1)",
-      }}
-    >
-      <style>{`@keyframes slideInRight { from { transform: translateX(24px); opacity: 0 } to { transform: translateX(0); opacity: 1 } }`}</style>
-        <div style={{ display: "flex", alignItems: "center" }}>
-          <span style={{ display: "inline-flex", alignItems: "center", gap: 7, fontSize: 10.5, letterSpacing: "0.14em", textTransform: "uppercase", color: ACCENT }}>
-            <Sparkles size={13} /> New agent
-          </span>
-          <span style={{ flex: 1 }} />
-          <button onClick={onClose} style={{ background: "transparent", border: "none", color: MID, cursor: "pointer", padding: 4 }}><X size={16} /></button>
-        </div>
-
-        <div>
-          <h2 style={{ margin: 0, fontSize: 22, fontWeight: 600, color: TEXT, letterSpacing: "-0.02em" }}>What should your agent do?</h2>
-          <p style={{ margin: "6px 0 0", fontSize: 13, color: MID, lineHeight: 1.5 }}>
-            Describe it in plain English. CLOVE asks only what&apos;s unclear, then builds + wires it on Base.
-          </p>
-        </div>
-
-        <textarea
-          autoFocus
-          rows={4}
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-          onKeyDown={(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); onSubmit(); } }}
-          placeholder="e.g. Copy the smartest money on Base — mirror them when 2+ converge. Budget $2, every 5 minutes, Telegram report."
-          style={{
-            width: "100%", background: INK, border: `1px solid ${LINE_MID}`, borderRadius: 12,
-            padding: "14px 16px", color: TEXT, fontSize: 14, fontFamily: "var(--sans)",
-            resize: "none", lineHeight: 1.5, outline: "none", letterSpacing: "-0.005em",
-          }}
-          onFocus={(e) => { e.currentTarget.style.borderColor = ACCENT_SOFT; }}
-          onBlur={(e) => { e.currentTarget.style.borderColor = LINE_MID; }}
-        />
-
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
-          {examples.map((x, i) => (
-            <button
-              key={i}
-              onClick={() => onChange(x.ex)}
-              title={x.ex}
-              style={{
-                display: "inline-flex", alignItems: "center", gap: 6, padding: "6px 11px",
-                background: "rgba(244,241,234,0.04)", border: `1px solid ${LINE}`, borderRadius: 999,
-                color: TEXT2, fontSize: 11.5, cursor: "pointer",
-              }}
-              onMouseEnter={(e) => { e.currentTarget.style.borderColor = LINE_MID; e.currentTarget.style.color = TEXT; }}
-              onMouseLeave={(e) => { e.currentTarget.style.borderColor = LINE; e.currentTarget.style.color = TEXT2; }}
-            >
-              <span>{x.icon}</span>{x.category}
-            </button>
-          ))}
-        </div>
-
-        <div style={{ display: "flex", alignItems: "center", gap: 12, borderTop: `1px solid ${LINE}`, paddingTop: 16 }}>
-          <span style={{ fontSize: 11, color: MID }}>⌘ / Ctrl + Enter to create</span>
-          <span style={{ flex: 1 }} />
-          <button onClick={onClose} style={{ padding: "9px 14px", borderRadius: 9, background: "transparent", border: `1px solid ${LINE_MID}`, color: TEXT2, fontSize: 13, cursor: "pointer" }}>Cancel</button>
-          <button
-            onClick={onSubmit}
-            disabled={submitting || !value.trim()}
-            style={{
-              padding: "9px 18px", borderRadius: 9, background: ACCENT, color: INK, border: "none",
-              fontWeight: 600, fontSize: 13, cursor: submitting || !value.trim() ? "not-allowed" : "pointer",
-              opacity: submitting || !value.trim() ? 0.5 : 1, boxShadow: `0 4px 14px -4px ${ACCENT_GLOW}`,
-            }}
-          >
-            {submitting ? "Creating…" : "Create agent →"}
-          </button>
-        </div>
-    </div>
-  );
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 //  Fix 3C: Right history drawer
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1904,176 +1637,6 @@ function HistoryDrawer({
 //  Fix 4: Security Scan Modal
 // ─────────────────────────────────────────────────────────────────────────────
 
-function SecurityScanModal({
-  findings, onClose, agents, onRefresh,
-}: {
-  findings: SecurityFinding[];
-  onClose: () => void;
-  agents: Agent[];
-  onRefresh: () => void;
-}) {
-  const [fixing, setFixing] = React.useState(false);
-  const [fixLog, setFixLog] = React.useState<string[]>([]);
-
-  const sortOrder: Record<SecurityFinding["severity"], number> = { critical: 0, high: 1, medium: 2, info: 3 };
-  const sorted = [...findings].sort((a, b) => sortOrder[a.severity] - sortOrder[b.severity]);
-
-  const counts = findings.reduce((acc, f) => {
-    acc[f.severity] = (acc[f.severity] ?? 0) + 1;
-    return acc;
-  }, {} as Record<string, number>);
-
-  // Count agents that need permission
-  const agentsNeedingPermission = agents.filter(a => !hasRealDelegation(a));
-
-  const handleGrantAll = async () => {
-    const mm = metamaskStore.getState();
-    if (!mm.permission?.permissionsContext) {
-      // UX-7 fix: use the MAX budget across all unprotected agents, not a hardcoded "10"
-      const maxBudget = agentsNeedingPermission.reduce(
-        (max, a) => Math.max(max, parseFloat(a.budgetUsdc) || 0), 0
-      );
-      const budget = String(Math.max(10, maxBudget));
-      await metamaskStore.requestPermission(budget, 90, "CLOVE bulk agent authorization");
-    }
-    const perm = metamaskStore.getState().permission;
-    if (!perm) { setFixLog(["❌ No permission granted — open MetaMask and try again."]); return; }
-
-    setFixing(true);
-    const log: string[] = [];
-    for (const a of agentsNeedingPermission) {
-      try {
-        const res = await fetch(`/api/agent/${a.id}/delegate-from-user`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            permissionsContext:       perm.permissionsContext,
-            delegationManagerAddress: perm.delegationManager,
-            delegationHash:           "0xpending",
-            capUsdc:                  a.budgetUsdc,
-          }),
-        });
-        log.push(res.ok ? `✅ ${a.name}` : `❌ ${a.name} (${res.status})`);
-      } catch {
-        log.push(`❌ ${a.name} (network error)`);
-      }
-    }
-    setFixLog(log);
-    setFixing(false);
-    await onRefresh();
-  };
-
-  return (
-    <div
-      onClick={onClose}
-      style={{
-        position: "fixed", inset: 0, zIndex: 100,
-        background: "rgba(11,12,9,0.75)", backdropFilter: "blur(8px)",
-        display: "flex", alignItems: "center", justifyContent: "center", padding: 24,
-      }}
-    >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        style={{
-          background: INK_1, border: `1px solid ${LINE_MID}`, borderRadius: 14,
-          padding: "28px 32px", width: 580, maxWidth: "100%", maxHeight: "82vh",
-          color: TEXT, display: "flex", flexDirection: "column", gap: 16,
-          overflowY: "auto",
-        }}
-      >
-        {/* Header */}
-        <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between" }}>
-          <div>
-            <div style={{ fontSize: 11, color: MID, letterSpacing: "0.14em", textTransform: "uppercase" }}>Security scan</div>
-            <div style={{ fontSize: 22, fontWeight: 500, marginTop: 6, fontFamily: "var(--serif)", fontStyle: "italic", letterSpacing: "-0.015em" }}>
-              {findings.length} finding{findings.length !== 1 ? "s" : ""}
-            </div>
-          </div>
-          <button onClick={onClose} style={{ background: "transparent", border: "none", cursor: "pointer", color: MID, marginTop: 4 }}>
-            <X size={16} />
-          </button>
-        </div>
-
-        {/* Summary chips */}
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          {(["critical","high","medium","info"] as const).map(sev => (
-            counts[sev] ? (
-              <span key={sev} style={{
-                padding: "3px 10px", borderRadius: 999, fontSize: 11,
-                background: `${SEVERITY_COLOR[sev]}18`,
-                border: `1px solid ${SEVERITY_COLOR[sev]}44`,
-                color: SEVERITY_COLOR[sev],
-              }}>
-                {counts[sev]} {sev}
-              </span>
-            ) : null
-          ))}
-        </div>
-
-        {/* Fix All action — grant ERC-7715 to all unprotected agents */}
-        {agentsNeedingPermission.length > 0 && (
-          <div style={{
-            padding: "14px 16px", borderRadius: 10,
-            background: "rgba(200,255,61,0.05)",
-            border: "1px solid rgba(200,255,61,0.2)",
-          }}>
-            <div style={{ fontSize: 12, color: TEXT2, lineHeight: 1.5, marginBottom: 10 }}>
-              <strong style={{ color: TEXT }}>{agentsNeedingPermission.length} agent{agentsNeedingPermission.length !== 1 ? "s" : ""}</strong> {" "}
-              have no real ERC-7715 delegation. Granting permission will bind your MetaMask ERC-7715 context to all of them at once.
-            </div>
-            {fixLog.length > 0 && (
-              <div style={{ fontSize: 11, fontFamily: "monospace", color: TEXT2, marginBottom: 10, lineHeight: 1.8 }}>
-                {fixLog.map((l, i) => <div key={i}>{l}</div>)}
-              </div>
-            )}
-            <button
-              onClick={handleGrantAll}
-              disabled={fixing}
-              style={{
-                padding: "8px 16px", borderRadius: 7,
-                background: ACCENT, color: INK,
-                border: "none", fontWeight: 600, fontSize: 12.5,
-                cursor: fixing ? "not-allowed" : "pointer",
-                opacity: fixing ? 0.6 : 1,
-              }}
-            >
-              {fixing ? "Granting…" : `⚡ Grant ERC-7715 to all ${agentsNeedingPermission.length} agents`}
-            </button>
-          </div>
-        )}
-
-        {agentsNeedingPermission.length === 0 && findings.filter(f => f.severity !== "info").length === 0 && (
-          <div style={{ textAlign: "center", padding: "20px 0", fontSize: 14, color: ACCENT }}>
-            ✅ No critical issues — all agents have real delegations.
-          </div>
-        )}
-
-        {/* Findings list */}
-        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          {sorted.map((f, i) => (
-            <div key={i} style={{
-              padding: "11px 13px", borderRadius: 9,
-              background: `${SEVERITY_COLOR[f.severity]}06`,
-              border: `1px solid ${SEVERITY_COLOR[f.severity]}22`,
-            }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 3 }}>
-                <span style={{
-                  fontSize: 9, letterSpacing: "0.12em", textTransform: "uppercase",
-                  color: SEVERITY_COLOR[f.severity], fontWeight: 600,
-                }}>
-                  {f.severity}
-                </span>
-                <span style={{ fontSize: 10, color: MID }}>· {f.agentName}</span>
-              </div>
-              <div style={{ fontSize: 12.5, color: TEXT, lineHeight: 1.4, marginBottom: 3 }}>{f.issue}</div>
-              <div style={{ fontSize: 11, color: MID_2, lineHeight: 1.4 }}>Fix: {f.fix}</div>
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  SessionAddressChip

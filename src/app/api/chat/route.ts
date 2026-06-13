@@ -2,7 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import type OpenAI from "openai";
 import { getVeniceClient, VENICE_MODELS } from "@/lib/venice/client";
 import { buildMemoryPrompt } from "@/lib/agent/memory";
-import { getThread, appendMessages, type ChatMessage } from "@/lib/chat/store";
+import { getThread, appendMessages, listThreads, type ChatMessage } from "@/lib/chat/store";
+import { listAgentsForWallet } from "@/lib/agent/agents";
 
 export const maxDuration = 30;
 
@@ -15,17 +16,23 @@ export const maxDuration = 30;
 const SYSTEM_PROMPT = `You are CLOVE, an autonomous DeFi agent OS on Base mainnet (chainId 8453).
 
 WHAT YOU ARE:
-- Users describe a strategy in plain English; you assemble a TEAM of autonomous agents that execute it on-chain using a delegated, on-chain-capped USDC budget.
+- Users describe a strategy in plain English; you assemble autonomous agents that execute it on-chain using a delegated, on-chain-capped USDC budget.
 - Permissions: the user grants an ERC-7715 USDC budget; each agent gets its own scoped cap enforced on-chain. Gas is paid in USDC via the 1Shot public relayer — the user never needs ETH.
-- Agent types: yield teams (scout → risk → execute), copy-traders (mirror smart-money swaps), and rebalancers (move funds to better yields). Agents run on a schedule and report to Telegram.
 - The user controls everything from this dashboard or from the linked Telegram bot.
+
+AGENT TYPES (these are DISTINCT and enforced by the code — never say the distinction isn't enforced):
+- yield 🌾 — finds the best DeFi yield and DEPOSITS fresh USDC into it (checkYields → checkRisk → executeDefi). Can be a single agent OR a multi-agent TEAM: Fund Manager → Scout → Convergence Analyzer → Risk Monitor → Executors.
+- copy-trader 🐋 — mirrors smart-money wallets when 2+ converge on a token (discoverWhales / checkWhaleTrades → executeCopyTrade).
+- rebalancer ⚖️ — a SINGLE agent that reads the user's CURRENT on-chain positions (monitorPositions), checks the best real yields (checkRealYields), and MOVES funds from an underperforming protocol to a better one (rebalance) ONLY when the gain beats gas + switching cost. It does NOT deposit fresh capital and is NOT a team.
+- A multi-agent "team" (Fund Manager + Scout + Risk + Executors) is ALWAYS the yield topology — it deposits. If a user wanted rebalancing but has a Scout/Risk/Executor team, they built a yield team; a true rebalancer is one ⚖️ agent. Tell them this plainly.
 
 HOW TO BEHAVE:
 - Be concise, warm, and concrete. You are a guide, not a sales pitch.
 - Answer questions about what CLOVE is and what the user can do here.
-- If the user describes a strategy they want to run, help them shape it — but DO NOT claim to have created anything. Agent creation happens when they confirm via the "New workflow" flow. If they're ready, tell them to describe it in the prompt bar / click New workflow.
-- Never invent transaction hashes, balances, or APYs. If you don't have live data in context, say so.
-- Keep replies short (a few sentences). Use plain language, not jargon dumps.`;
+- When asked about the user's agents ("how many", "what are they"), use THE USER'S AGENTS list below — give the real count/names, never a generic answer. If the list is absent, say you can't see their agents (wallet not connected).
+- If the user describes a strategy, help them shape it — but DO NOT claim to have created anything. Building happens when they confirm in the chat.
+- Never invent transaction hashes, balances, or APYs, and never invent agent counts. If you don't have it in context, say so.
+- Keep replies short (a few sentences). Plain language, not jargon dumps.`;
 
 export async function POST(req: NextRequest) {
   let body: { message?: unknown; walletAddress?: unknown };
@@ -35,12 +42,14 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Invalid body" }, { status: 400 });
   }
 
-  const message = String(body.message ?? "").trim();
-  const wallet  = String(body.walletAddress ?? "").trim();
+  const message  = String(body.message ?? "").trim();
+  const wallet   = String(body.walletAddress ?? "").trim();
+  const threadId = String((body as { threadId?: unknown }).threadId ?? "").trim();
   if (!message) return NextResponse.json({ error: "message required" }, { status: 400 });
 
-  // Prior turns for continuity (shared with Telegram via the same wallet key).
-  const history = wallet ? await getThread(wallet) : [];
+  // Prior turns for continuity within THIS thread (shared with Telegram via the
+  // same wallet+thread key).
+  const history = wallet && threadId ? await getThread(wallet, threadId) : [];
 
   // Inject the existing memory layer as context (positions, recent runs, insights).
   let memoryContext = "";
@@ -52,8 +61,25 @@ export async function POST(req: NextRequest) {
     }
   }
 
+  // The user's REAL agents, so "how many agents do I have" is answered from fact.
+  let rosterContext = "";
+  if (wallet) {
+    try {
+      const agents = await listAgentsForWallet(wallet);
+      rosterContext = agents.length === 0
+        ? "The user has no agents yet."
+        : `The user has ${agents.length} agent(s):\n` +
+          agents.map(a =>
+            `- ${a.name} [type: ${a.agentType ?? "yield"}${a.parentAgentId ? ", team worker" : ""}] — budget ${a.budgetUsdc} USDC`,
+          ).join("\n");
+    } catch {
+      /* non-fatal */
+    }
+  }
+
   const system =
     SYSTEM_PROMPT +
+    (rosterContext ? `\n\n=== THE USER'S AGENTS ===\n${rosterContext}` : "") +
     (memoryContext ? `\n\n=== THIS USER'S CONTEXT (live) ===\n${memoryContext}` : "");
 
   const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
@@ -83,20 +109,26 @@ export async function POST(req: NextRequest) {
   }
   if (!reply) reply = "I didn't catch that — could you rephrase?";
 
-  // Persist both turns (fire-and-forget; only when we have a wallet to key on).
-  if (wallet) {
+  // Persist both turns (fire-and-forget; only with a wallet + thread to key on).
+  if (wallet && threadId) {
     const userTurn: ChatMessage      = { role: "user",      content: message, ts: new Date().toISOString(), source: "web" };
     const assistantTurn: ChatMessage = { role: "assistant", content: reply,   ts: new Date().toISOString(), source: "web" };
-    void appendMessages(wallet, [userTurn, assistantTurn]);
+    void appendMessages(wallet, threadId, [userTurn, assistantTurn]);
   }
 
   return NextResponse.json({ reply });
 }
 
-/** Load a wallet's thread so the panel can rehydrate on reload. */
+/**
+ * GET ?wallet=&list=1            → { threads: ThreadSummary[] } (history list)
+ * GET ?wallet=&threadId=<id>     → { messages } (rehydrate one thread)
+ */
 export async function GET(req: NextRequest) {
-  const wallet = req.nextUrl.searchParams.get("wallet");
-  if (!wallet) return NextResponse.json({ messages: [] });
-  const messages = await getThread(wallet);
-  return NextResponse.json({ messages });
+  const wallet   = req.nextUrl.searchParams.get("wallet");
+  const threadId = req.nextUrl.searchParams.get("threadId");
+  const list     = req.nextUrl.searchParams.get("list");
+  if (!wallet) return NextResponse.json({ messages: [], threads: [] });
+  if (list)     return NextResponse.json({ threads: await listThreads(wallet) });
+  if (threadId) return NextResponse.json({ messages: await getThread(wallet, threadId) });
+  return NextResponse.json({ messages: [] });
 }

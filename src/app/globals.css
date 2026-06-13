@@ -175,3 +175,31 @@ body {
 
 /* ─────────── Hide old terminal/loud styles that the design rejects ─────────── */
 /* No mono terminal logs anywhere — refined sans only. */
+
+/* ─────────── Chat (Phase 6): branded loading + entrance transitions ─────────── */
+@keyframes clove-blink { 0%, 80%, 100% { opacity: 0.25; } 40% { opacity: 1; } }
+@keyframes clove-rise-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes clove-fade-in { from { opacity: 0; } to { opacity: 1; } }
+
+/* Animated "thinking" dots after the label */
+.clove-typing::after {
+  content: "";
+  display: inline-block;
+  margin-left: 2px;
+  animation: clove-blink 1.2s infinite;
+}
+.clove-typing { position: relative; }
+.clove-typing span.d { animation: clove-blink 1.2s infinite; }
+.clove-typing span.d:nth-child(2) { animation-delay: 0.2s; }
+.clove-typing span.d:nth-child(3) { animation-delay: 0.4s; }
+
+/* Message + card entrance */
+.clove-msg-in  { animation: clove-rise-in 0.28s ease-out both; }
+.clove-fade-in { animation: clove-fade-in 0.35s ease-out both; }
+
+@media (prefers-reduced-motion: reduce) {
+  .clove-msg-in, .clove-fade-in, .clove-typing span.d, .clove-typing::after { animation: none; }
+}
